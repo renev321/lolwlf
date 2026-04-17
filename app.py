@@ -35,6 +35,20 @@ div[data-testid="stHorizontalBlock"] {
 """, unsafe_allow_html=True)
 
 
+def mostrar_bloque_ayuda(titulo: str, descripcion: str, preguntas: list[str]):
+    with st.expander(f"¿Para qué sirve esta página? · {titulo}", expanded=False):
+        st.markdown(descripcion)
+        st.markdown("**Qué deberías mirar aquí:**")
+        for q in preguntas:
+            st.markdown(f"- {q}")
+
+
+def mostrar_bloque_conclusion(titulo: str, lineas: list[str]):
+    st.markdown(f"**Lectura rápida · {titulo}**")
+    for linea in lineas:
+        st.markdown(f"- {linea}")
+
+
 def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
     records: list[dict] = []
 
@@ -327,6 +341,17 @@ def max_streak(series: pd.Series, positive: bool = True) -> int:
 
 def render_overview(ops_df: pd.DataFrame):
     st.subheader("Salud del Bot")
+    mostrar_bloque_ayuda(
+        "Salud del Bot",
+        "Esta página te da una vista general del rendimiento del bot. Sirve para validar si el sistema tiene sentido antes de entrar en detalles más finos como sesiones, reversals o timing.",
+        [
+            "¿El bot gana dinero de forma general?",
+            "¿El profit factor y la tasa de acierto son razonables?",
+            "¿La mejor operación y la peor operación están demasiado separadas?",
+            "¿Hay estabilidad o el resultado depende de pocos días grandes?",
+        ],
+    )
+
     metrics = compute_overview_metrics(ops_df)
     if not metrics:
         st.info("No se encontraron datos de operaciones.")
@@ -377,9 +402,36 @@ def render_overview(ops_df: pd.DataFrame):
     ax.tick_params(axis="x", rotation=45)
     st.pyplot(fig)
 
+    lineas = []
+    if metrics["total_net_pnl"] > 0:
+        lineas.append("El bot está positivo en el rango de datos cargado.")
+    else:
+        lineas.append("El bot todavía no está positivo en el rango de datos cargado.")
+
+    if not pd.isna(metrics["profit_factor"]):
+        if metrics["profit_factor"] >= 1.5:
+            lineas.append("El profit factor es saludable y sugiere una ventaja interesante.")
+        elif metrics["profit_factor"] >= 1.0:
+            lineas.append("El profit factor es aceptable, pero todavía puede requerir filtrado o ajuste.")
+        else:
+            lineas.append("El profit factor está débil; conviene revisar sesiones, timing y reversals.")
+
+    mostrar_bloque_conclusion("Salud del Bot", lineas)
+
 
 def render_reversal_engine(ops_df: pd.DataFrame):
     st.subheader("Motor de Reversiones")
+    mostrar_bloque_ayuda(
+        "Motor de Reversiones",
+        "Esta página sirve para entender si el sistema realmente mejora o empeora cuando profundiza en más reversals. Aquí debes decidir si conviene permitir 0, 1, 2, 3 o más reversiones.",
+        [
+            "¿Las operaciones sin reversals ya son suficientemente buenas?",
+            "¿A partir de qué número de reversals cae el PnL promedio?",
+            "¿Qué profundidad de reversal trae demasiado drawdown?",
+            "¿Cuál es la profundidad máxima sensata para el bot?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -404,9 +456,31 @@ def render_reversal_engine(ops_df: pd.DataFrame):
     ax.set_ylabel("PnL Total")
     st.pyplot(fig)
 
+    lineas = []
+    if not grouped.empty:
+        mejor_fila = grouped.sort_values("pnl_promedio", ascending=False).iloc[0]
+        peor_fila = grouped.sort_values("pnl_promedio", ascending=True).iloc[0]
+        lineas.append(f"La mejor profundidad por PnL promedio es {mejor_fila['reversiones']} reversión(es).")
+        lineas.append(f"La peor profundidad por PnL promedio es {peor_fila['reversiones']} reversión(es).")
+        if peor_fila["reversiones"] != mejor_fila["reversiones"]:
+            lineas.append("Esto te puede ayudar a decidir si conviene cortar el bot antes de profundidades débiles.")
+
+    mostrar_bloque_conclusion("Motor de Reversiones", lineas)
+
 
 def render_daily_goal_simulator(ops_df: pd.DataFrame):
     st.subheader("Simulador de Meta Diaria")
+    mostrar_bloque_ayuda(
+        "Simulador de Meta Diaria",
+        "Esta página simula cómo se habría comportado el bot si hubieras detenido el día al alcanzar una meta diaria o una pérdida máxima diaria. Sirve para elegir un plan diario realista.",
+        [
+            "¿Qué tan seguido se alcanza la meta antes que la pérdida?",
+            "¿Una meta diaria alta reduce demasiado la consistencia?",
+            "¿Una pérdida máxima demasiado amplia empeora el perfil diario?",
+            "¿Qué combinación de meta/pérdida parece más equilibrada?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -448,9 +522,33 @@ def render_daily_goal_simulator(ops_df: pd.DataFrame):
 
         st.dataframe(ordered, use_container_width=True)
 
+        lineas = []
+        if metrics["target_first_rate"] > metrics["loss_first_rate"]:
+            lineas.append("La meta diaria se alcanza antes que la pérdida en una proporción favorable.")
+        else:
+            lineas.append("La pérdida diaria está saltando demasiado pronto frente a la meta configurada.")
+
+        if metrics["avg_daily_result"] > 0:
+            lineas.append("El resultado diario promedio de esta simulación es positivo.")
+        else:
+            lineas.append("El resultado diario promedio de esta simulación todavía no es positivo.")
+
+        mostrar_bloque_conclusion("Simulador de Meta Diaria", lineas)
+
 
 def render_time_edge(ops_df: pd.DataFrame):
     st.subheader("Ventaja Temporal")
+    mostrar_bloque_ayuda(
+        "Ventaja Temporal",
+        "Esta página ayuda a detectar en qué horas y días el bot tiene mejor o peor comportamiento. Es clave para decidir si conviene bloquear ciertas franjas horarias.",
+        [
+            "¿Qué horas generan más PnL?",
+            "¿Qué horas exigen más reversals o más drawdown?",
+            "¿Hay días de la semana consistentemente débiles?",
+            "¿Conviene reducir o cortar el bot en ciertos horarios?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -484,9 +582,29 @@ def render_time_edge(ops_df: pd.DataFrame):
     ax.set_ylabel("PnL")
     st.pyplot(fig)
 
+    lineas = []
+    if not by_hour.empty:
+        mejor_hora = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
+        peor_hora = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
+        lineas.append(f"La mejor hora cargada por PnL total es {int(mejor_hora['hora_inicio'])}:00.")
+        lineas.append(f"La peor hora cargada por PnL total es {int(peor_hora['hora_inicio'])}:00.")
+
+    mostrar_bloque_conclusion("Ventaja Temporal", lineas)
+
 
 def render_session_intelligence(ops_df: pd.DataFrame):
     st.subheader("Inteligencia por Sesión")
+    mostrar_bloque_ayuda(
+        "Inteligencia por Sesión",
+        "Esta página compara el rendimiento entre Asia, Londres, NY Open, NY Midday y NY Late. Sirve para decidir qué sesión conviene priorizar, reducir o eliminar.",
+        [
+            "¿Qué sesión aporta más PnL total y promedio?",
+            "¿Qué sesión exige más reversals?",
+            "¿Qué sesión trae más drawdown?",
+            "¿Hay una sesión que conviene bloquear completamente?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -504,6 +622,12 @@ def render_session_intelligence(ops_df: pd.DataFrame):
     if len(session_df) == 1:
         st.info("Por ahora solo hay una sesión en los datos cargados. Cuando cargues más meses o más horarios, esta vista se volverá mucho más útil.")
         st.dataframe(session_df, use_container_width=True)
+
+        lineas = []
+        mejor_sesion = session_df.iloc[0]
+        lineas.append(f"Por ahora solo hay datos de la sesión {mejor_sesion['sesion']}.")
+        lineas.append("Cuando cargues más días podrás comparar mejor qué sesión conviene mantener o bloquear.")
+        mostrar_bloque_conclusion("Inteligencia por Sesión", lineas)
         return
 
     st.dataframe(session_df, use_container_width=True)
@@ -516,9 +640,29 @@ def render_session_intelligence(ops_df: pd.DataFrame):
     ax.tick_params(axis="x", rotation=25)
     st.pyplot(fig)
 
+    lineas = []
+    if not session_df.empty:
+        mejor_sesion = session_df.sort_values("pnl_total", ascending=False).iloc[0]
+        peor_sesion = session_df.sort_values("pnl_total", ascending=True).iloc[0]
+        lineas.append(f"La sesión más fuerte por PnL total es {mejor_sesion['sesion']}.")
+        lineas.append(f"La sesión más débil por PnL total es {peor_sesion['sesion']}.")
+
+    mostrar_bloque_conclusion("Inteligencia por Sesión", lineas)
+
 
 def render_crazy_mode_timing(ops_df: pd.DataFrame):
     st.subheader("Timing de Crazy Mode")
+    mostrar_bloque_ayuda(
+        "Timing de Crazy Mode",
+        "Esta página analiza qué tan buenas o malas son la primera, segunda, tercera y demás operaciones del día. Sirve para decidir hasta qué número de operación conviene dejar correr el bot.",
+        [
+            "¿La operación #1 del día es la mejor?",
+            "¿La operación #3 o #4 ya pierde edge?",
+            "¿A partir de qué número sube demasiado el drawdown?",
+            "¿Conviene limitar Crazy Mode a pocas operaciones por día?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -542,9 +686,29 @@ def render_crazy_mode_timing(ops_df: pd.DataFrame):
     ax.set_ylabel("PnL")
     st.pyplot(fig)
 
+    lineas = []
+    if not timing_df.empty:
+        mejor_num = timing_df.sort_values("pnl_promedio", ascending=False).iloc[0]
+        peor_num = timing_df.sort_values("pnl_promedio", ascending=True).iloc[0]
+        lineas.append(f"La mejor operación del día por PnL promedio es la #{int(mejor_num['numero_operacion_dia'])}.")
+        lineas.append(f"La peor operación del día por PnL promedio es la #{int(peor_num['numero_operacion_dia'])}.")
+
+    mostrar_bloque_conclusion("Timing de Crazy Mode", lineas)
+
 
 def render_parameter_lab(ops_df: pd.DataFrame):
     st.subheader("Laboratorio de Parámetros")
+    mostrar_bloque_ayuda(
+        "Laboratorio de Parámetros",
+        "Esta página sirve para comparar cómo rinden distintas configuraciones del bot. Es muy útil cuando ya tengas más meses o más pruebas con diferentes settings.",
+        [
+            "¿Qué stop está dando mejor equilibrio entre PnL y drawdown?",
+            "¿Qué target está funcionando mejor?",
+            "¿DistancePoints más alto o más bajo mejora el resultado?",
+            "¿Más MaxReversals realmente ayuda o solo agranda el riesgo?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -573,9 +737,27 @@ def render_parameter_lab(ops_df: pd.DataFrame):
     ax.tick_params(axis="x", rotation=25)
     st.pyplot(fig)
 
+    lineas = []
+    if not grouped.empty:
+        mejor_param = grouped.sort_values("pnl_promedio", ascending=False).iloc[0]
+        lineas.append(f"El mejor valor cargado de {param} por PnL promedio es {mejor_param[param]}.")
+
+    mostrar_bloque_conclusion("Laboratorio de Parámetros", lineas)
+
 
 def render_exit_engine(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("Motor de Salidas")
+    mostrar_bloque_ayuda(
+        "Motor de Salidas",
+        "Esta página sirve para entender cómo termina realmente cada pierna y si Auto BE o Trailing están ayudando o estorbando. Ojo: una cosa es el tipo de salida final y otra distinta es si el management fue activado.",
+        [
+            "¿Las piernas terminan más por TP, SL, BE o TS?",
+            "¿Cuando Auto BE se activa, mejora o empeora el resultado promedio?",
+            "¿Trailing protege beneficios o corta demasiado pronto?",
+            "¿Conviene retrasar o suavizar el management?",
+        ],
+    )
+
     if legs_df.empty:
         st.info("No se encontraron datos de piernas.")
         return
@@ -596,6 +778,20 @@ def render_exit_engine(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         pnl_promedio=("realized_pnl_currency", "mean"),
     )
 
+    be_stats["auto_be_activated"] = be_stats["auto_be_activated"].map({False: "No", True: "Sí", 0: "No", 1: "Sí"})
+    tr_stats["trailing_activated"] = tr_stats["trailing_activated"].map({False: "No", True: "Sí", 0: "No", 1: "Sí"})
+
+    be_stats = be_stats.rename(columns={
+        "auto_be_activated": "Auto BE activado",
+        "piernas": "Piernas",
+        "pnl_promedio": "PnL Promedio",
+    })
+    tr_stats = tr_stats.rename(columns={
+        "trailing_activated": "Trailing activado",
+        "piernas": "Piernas",
+        "pnl_promedio": "PnL Promedio",
+    })
+
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Impacto de Auto BE**")
@@ -604,9 +800,27 @@ def render_exit_engine(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.markdown("**Impacto del Trailing**")
         st.dataframe(tr_stats, use_container_width=True)
 
+    lineas = []
+    if not exit_df.empty:
+        top_exit = exit_df.sort_values("piernas", ascending=False).iloc[0]
+        lineas.append(f"El tipo de salida más frecuente es {top_exit['exit_result_type']}.")
+
+    mostrar_bloque_conclusion("Motor de Salidas", lineas)
+
 
 def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("Explorador de Operaciones")
+    mostrar_bloque_ayuda(
+        "Explorador de Operaciones",
+        "Esta página sirve para abrir operaciones concretas y entender su historia completa: entrada base, reversals, qty, salidas y evolución del PnL acumulado.",
+        [
+            "¿Qué pasó exactamente en una operación específica?",
+            "¿Cuántos reversals necesitó?",
+            "¿Qué tamaño tomó cada pierna?",
+            "¿Cómo evolucionó el PnL durante la secuencia?",
+        ],
+    )
+
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
