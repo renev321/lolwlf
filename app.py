@@ -851,18 +851,6 @@ def render_exit_engine(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
 def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("Explorador de Operaciones")
-    mostrar_bloque_ayuda(
-        "Explorador de Operaciones",
-        "Esta página sirve para abrir operaciones concretas y entender su historia completa: entrada base, reversals, qty, salidas y evolución del PnL acumulado. Como aquí puede haber muchísimas operaciones, los filtros son clave.",
-        [
-            "¿Qué pasó exactamente en una operación específica?",
-            "¿Cuántos reversals necesitó?",
-            "¿Qué tamaño tomó cada pierna?",
-            "¿Cómo evolucionó el PnL durante la secuencia?",
-            "¿Qué operaciones quiero revisar por fecha, sesión o tipo de cierre?",
-        ],
-    )
-
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
         return
@@ -902,13 +890,12 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             value=max_date.date() if pd.notna(max_date) else None,
         )
 
-        reversals_disponibles = sorted(
-            [int(x) for x in filtro_df["reversal_count"].dropna().unique().tolist()]
-        )
-        reversals_sel = st.multiselect(
-            "Cantidad de reversals",
-            options=reversals_disponibles,
-            default=reversals_disponibles,
+        max_reversal_disponible = int(filtro_df["reversal_count"].fillna(0).max())
+
+        max_reversal_permitido = st.selectbox(
+            "Máximo reversal permitido",
+            options=list(range(0, max_reversal_disponible + 1)),
+            index=max_reversal_disponible,
         )
 
         numeros_op_disponibles = sorted(
@@ -934,9 +921,6 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     if razones_sel:
         filtro_df = filtro_df[filtro_df["sequence_end_reason"].isin(razones_sel)]
 
-    if reversals_sel:
-        filtro_df = filtro_df[filtro_df["reversal_count"].isin(reversals_sel)]
-
     if numeros_op_sel:
         filtro_df = filtro_df[filtro_df["numero_operacion_dia"].isin(numeros_op_sel)]
 
@@ -945,17 +929,33 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             filtro_df["operation_id"].astype(str).str.contains(texto_busqueda.strip(), case=False, na=False)
         ]
 
+    # Nuevo cálculo: pnl simulado según cap de reversal
+    filtro_df = filtro_df.copy()
+    filtro_df["pnl_simulado_cap_reversal"] = filtro_df.apply(
+        lambda row: calcular_pnl_simulado_por_cap_reversal(
+            row,
+            legs_df,
+            max_reversal_permitido,
+        ),
+        axis=1,
+    )
+
+    # Visible solo hasta el cap seleccionado
+    filtro_df_visible = filtro_df[
+        filtro_df["reversal_count"].fillna(0) <= max_reversal_permitido
+    ].copy()
+
     st.markdown("### Resultado filtrado")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Operaciones filtradas", f"{len(filtro_df)}")
+    c1.metric("Operaciones visibles", f"{len(filtro_df_visible)}")
     c2.metric(
-        "PnL Neto Filtrado",
-        f"{filtro_df['sequence_net_pnl_currency'].sum():.2f}" if not filtro_df.empty else "0.00",
+        "PnL Real Visible",
+        f"{filtro_df_visible['sequence_net_pnl_currency'].sum():.2f}" if not filtro_df_visible.empty else "0.00",
     )
     c3.metric(
-        "PnL Promedio Filtrado",
-        f"{filtro_df['sequence_net_pnl_currency'].mean():.2f}" if not filtro_df.empty else "0.00",
+        "PnL Simulado Cap",
+        f"{filtro_df['pnl_simulado_cap_reversal'].sum():.2f}" if not filtro_df.empty else "0.00",
     )
 
     if filtro_df.empty:
@@ -968,6 +968,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         "sequence_end_reason",
         "reversal_count",
         "sequence_net_pnl_currency",
+        "pnl_simulado_cap_reversal",
         "sequence_loss_currency",
         "operation_max_drawdown_currency",
         "operation_max_runup_currency",
@@ -1013,18 +1014,20 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             ax.set_ylabel("PnL Acumulado")
             st.pyplot(fig)
 
-        lineas = []
         fila = op_row.iloc[0]
-        lineas.append(
-            f"Esta operación terminó con {int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0} reversal(es)."
+        st.markdown("### Lectura rápida")
+        st.markdown(
+            f"- Esta operación terminó con **{int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0}** reversal(es)."
         )
-        lineas.append(
-            f"El resultado neto de la operación fue {fila['sequence_net_pnl_currency']:.2f}."
+        st.markdown(
+            f"- El **PnL real** de la operación fue **{fila['sequence_net_pnl_currency']:.2f}**."
         )
-        lineas.append(
-            f"La sesión clasificada para esta operación es {fila['sesion']}."
+        st.markdown(
+            f"- El **PnL simulado** con máximo reversal permitido = **{max_reversal_permitido}** fue **{fila['pnl_simulado_cap_reversal']:.2f}**."
         )
-        mostrar_bloque_conclusion("Explorador de Operaciones", lineas)
+        st.markdown(
+            f"- La sesión clasificada para esta operación es **{fila['sesion']}**."
+        )
 
 
 def main():
