@@ -998,7 +998,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
         razones_disponibles = sorted([r for r in filtro_df["sequence_end_reason"].dropna().unique().tolist()])
         razones_sel = st.multiselect(
-            "Razón de cierre",
+            "Razón de cierre real",
             options=razones_disponibles,
             default=razones_disponibles,
         )
@@ -1052,10 +1052,9 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones que cumplan con los filtros actuales.")
         return
 
-    # Calcula el pnl simulado bajo el cap elegido
-    filtro_df = filtro_df.copy()
-    filtro_df["pnl_simulado_cap_reversal"] = filtro_df.apply(
-        lambda row: calcular_pnl_simulado_por_cap_reversal(
+    # Mantener las MISMAS operaciones visibles y solo recalcular el resultado simulado
+    resultados_simulados = filtro_df.apply(
+        lambda row: calcular_resultado_simulado_por_cap_reversal(
             row,
             legs_df,
             max_reversal_permitido,
@@ -1063,35 +1062,32 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         axis=1,
     )
 
-    # Visible solo hasta el cap seleccionado
-    filtro_df_visible = filtro_df[
-        filtro_df["reversal_count"].fillna(0) <= max_reversal_permitido
-    ].copy()
+    resultados_simulados_df = pd.DataFrame(resultados_simulados.tolist(), index=filtro_df.index)
 
-    if filtro_df_visible.empty:
-        st.warning("No hay operaciones visibles con el máximo reversal permitido actual.")
-        return
+    filtro_df = pd.concat([filtro_df, resultados_simulados_df], axis=1)
 
     st.markdown("### Resultado filtrado")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Operaciones visibles", f"{len(filtro_df_visible)}")
+    c1.metric("Operaciones visibles", f"{len(filtro_df)}")
     c2.metric(
-        "PnL Real Visible",
-        f"{filtro_df_visible['sequence_net_pnl_currency'].sum():.2f}",
+        "PnL Real",
+        f"{filtro_df['sequence_net_pnl_currency'].sum():.2f}",
     )
     c3.metric(
         "PnL Simulado Cap",
-        f"{filtro_df['pnl_simulado_cap_reversal'].sum():.2f}",
+        f"{filtro_df['sequence_net_pnl_simulado'].sum():.2f}",
     )
 
     display_cols = [
         "operation_id",
         "sequence_started_at",
         "sequence_end_reason",
+        "sequence_end_reason_simulado",
         "reversal_count",
+        "reversal_count_simulado",
         "sequence_net_pnl_currency",
-        "pnl_simulado_cap_reversal",
+        "sequence_net_pnl_simulado",
         "sequence_loss_currency",
         "operation_max_drawdown_currency",
         "operation_max_runup_currency",
@@ -1103,12 +1099,12 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     ]
 
     st.dataframe(
-        filtro_df_visible[display_cols].sort_values("sequence_started_at", ascending=False),
+        filtro_df[display_cols].sort_values("sequence_started_at", ascending=False),
         use_container_width=True,
     )
 
     op_ids = (
-        filtro_df_visible.sort_values("sequence_started_at", ascending=False)["operation_id"]
+        filtro_df.sort_values("sequence_started_at", ascending=False)["operation_id"]
         .dropna()
         .astype(str)
         .tolist()
@@ -1117,7 +1113,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     selected_op = st.selectbox("Inspeccionar operación", op_ids)
 
     if selected_op:
-        op_row = filtro_df_visible.loc[filtro_df_visible["operation_id"] == selected_op]
+        op_row = filtro_df.loc[filtro_df["operation_id"] == selected_op]
         st.markdown("### Resumen de la operación")
         st.dataframe(op_row, use_container_width=True)
 
@@ -1140,13 +1136,22 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         fila = op_row.iloc[0]
         st.markdown("### Lectura rápida")
         st.markdown(
-            f"- Esta operación terminó con **{int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0}** reversal(es)."
+            f"- Esta operación tuvo **{int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0}** reversal(es) reales."
         )
         st.markdown(
-            f"- El **PnL real** de la operación fue **{fila['sequence_net_pnl_currency']:.2f}**."
+            f"- Con cap = **{max_reversal_permitido}**, se simula como **{int(fila['reversal_count_simulado']) if pd.notna(fila['reversal_count_simulado']) else 0}** reversal(es)."
         )
         st.markdown(
-            f"- El **PnL simulado** con máximo reversal permitido = **{max_reversal_permitido}** fue **{fila['pnl_simulado_cap_reversal']:.2f}**."
+            f"- La **razón de cierre real** fue **{fila['sequence_end_reason']}**."
+        )
+        st.markdown(
+            f"- La **razón de cierre simulada** fue **{fila['sequence_end_reason_simulado']}**."
+        )
+        st.markdown(
+            f"- El **PnL real** fue **{fila['sequence_net_pnl_currency']:.2f}**."
+        )
+        st.markdown(
+            f"- El **PnL simulado** con máximo reversal permitido = **{max_reversal_permitido}** fue **{fila['sequence_net_pnl_simulado']:.2f}**."
         )
         st.markdown(
             f"- La sesión clasificada para esta operación es **{fila['sesion']}**."
