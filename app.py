@@ -99,19 +99,14 @@ def _clasificar_sesion(ts: pd.Timestamp) -> str:
     m = ts.minute
     total_min = h * 60 + m
 
-    # Asia: 18:00–03:29
     if total_min >= 18 * 60 or total_min <= (3 * 60 + 29):
         return "Asia"
-    # Londres: 03:30–09:29
     if (3 * 60 + 30) <= total_min <= (9 * 60 + 29):
         return "Londres"
-    # NY Open: 09:30–10:30
     if (9 * 60 + 30) <= total_min <= (10 * 60 + 30):
         return "NY Open"
-    # NY Midday: 10:31–13:29
     if (10 * 60 + 31) <= total_min <= (13 * 60 + 29):
         return "NY Midday"
-    # NY Late: 13:30–17:00
     if (13 * 60 + 30) <= total_min <= (17 * 60):
         return "NY Late"
 
@@ -575,6 +570,10 @@ def render_time_edge(ops_df: pd.DataFrame):
         )
         st.dataframe(by_hour, use_container_width=True)
 
+    if len(by_hour) <= 1:
+        st.info("Todavía no hay suficiente variedad horaria para sacar conclusiones fuertes.")
+        return
+
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(by_hour["hora_inicio"].astype(str), by_hour["pnl_total"])
     ax.set_title("PnL Total por Hora")
@@ -679,6 +678,10 @@ def render_crazy_mode_timing(ops_df: pd.DataFrame):
 
     st.dataframe(timing_df, use_container_width=True)
 
+    if len(timing_df) <= 1:
+        st.info("Todavía no hay suficiente variedad en número de operaciones por día para sacar conclusiones fuertes.")
+        return
+
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(timing_df["numero_operacion_dia"].astype(str), timing_df["pnl_total"])
     ax.set_title("PnL Total por Número de Operación del Día")
@@ -728,6 +731,10 @@ def render_parameter_lab(ops_df: pd.DataFrame):
     grouped["tasa_acierto"] = grouped["tasa_acierto"] * 100
 
     st.dataframe(grouped, use_container_width=True)
+
+    if len(grouped) <= 1:
+        st.info("Todavía no hay suficiente variedad de parámetros en los datos cargados para comparar.")
+        return
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(grouped[param].astype(str), grouped["pnl_total"])
