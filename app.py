@@ -7,23 +7,48 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 
-st.set_page_config(page_title="lol_wlf Lab", layout="wide")
+st.set_page_config(page_title="Laboratorio lol_wlf", layout="wide")
+
+st.markdown("""
+<style>
+div[data-testid="stHorizontalBlock"] {
+    gap: 1rem;
+}
+.lab-card {
+    border: 1px solid rgba(128,128,128,0.25);
+    border-radius: 16px;
+    padding: 16px 18px;
+    min-height: 110px;
+    background: rgba(255,255,255,0.02);
+}
+.lab-card-title {
+    font-size: 0.95rem;
+    opacity: 0.8;
+    margin-bottom: 10px;
+}
+.lab-card-value {
+    font-size: 2.2rem;
+    font-weight: 700;
+    line-height: 1.1;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
     records: list[dict] = []
 
     if not uploaded_files:
-        st.sidebar.info("No files uploaded yet.")
+        st.sidebar.info("Todavía no has cargado archivos.")
         return records
 
     for uploaded_file in uploaded_files:
         try:
-            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            content = uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
             lines = content.splitlines()
 
-            st.sidebar.write(f"File: {uploaded_file.name}")
-            st.sidebar.write(f"Raw lines: {len(lines)}")
+            st.sidebar.write(f"Archivo: {uploaded_file.name}")
+            st.sidebar.write(f"Líneas crudas: {len(lines)}")
 
             valid_count = 0
             invalid_count = 0
@@ -40,14 +65,14 @@ def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
                 except json.JSONDecodeError as e:
                     invalid_count += 1
                     if invalid_count <= 3:
-                        st.sidebar.write(f"Invalid JSON line {i}: {line[:120]}")
+                        st.sidebar.write(f"Línea JSON inválida {i}: {line[:120]}")
                         st.sidebar.write(f"Error: {e}")
 
-            st.sidebar.write(f"Valid records: {valid_count}")
-            st.sidebar.write(f"Invalid lines: {invalid_count}")
+            st.sidebar.write(f"Registros válidos: {valid_count}")
+            st.sidebar.write(f"Líneas inválidas: {invalid_count}")
 
         except Exception as e:
-            st.sidebar.error(f"Failed reading {uploaded_file.name}: {e}")
+            st.sidebar.error(f"Error al leer {uploaded_file.name}: {e}")
 
     return records
 
@@ -171,9 +196,9 @@ def build_dataframes(records: list[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
             legs_df[col] = pd.to_numeric(legs_df[col], errors="coerce")
 
     ops_df["trade_day"] = ops_df["sequence_started_at"].dt.date
-    ops_df["start_hour"] = ops_df["sequence_started_at"].dt.hour
-    ops_df["start_minute"] = ops_df["sequence_started_at"].dt.minute
-    ops_df["is_winner"] = ops_df["sequence_net_pnl_currency"] > 0
+    ops_df["hora_inicio"] = ops_df["sequence_started_at"].dt.hour
+    ops_df["minuto_inicio"] = ops_df["sequence_started_at"].dt.minute
+    ops_df["es_ganadora"] = ops_df["sequence_net_pnl_currency"] > 0
 
     return ops_df, legs_df
 
@@ -212,7 +237,7 @@ def simulate_daily_plan(ops_df: pd.DataFrame, daily_target: float, daily_loss: f
 
     for trade_day, day_df in ops_df.sort_values("sequence_started_at").groupby("trade_day"):
         running = 0.0
-        outcome = "neither"
+        outcome = "ninguno"
         stop_after_operation = None
 
         for _, row in day_df.iterrows():
@@ -220,20 +245,20 @@ def simulate_daily_plan(ops_df: pd.DataFrame, daily_target: float, daily_loss: f
             stop_after_operation = row["operation_id"]
 
             if running >= daily_target:
-                outcome = "target_first"
+                outcome = "meta_primero"
                 running = daily_target
                 break
 
             if running <= -daily_loss:
-                outcome = "loss_first"
+                outcome = "perdida_primero"
                 running = -daily_loss
                 break
 
         sim_rows.append(
             {
                 "trade_day": trade_day,
-                "simulated_day_result": running,
-                "outcome": outcome,
+                "resultado_diario_simulado": running,
+                "resultado": outcome,
                 "stop_after_operation": stop_after_operation,
             }
         )
@@ -244,14 +269,14 @@ def simulate_daily_plan(ops_df: pd.DataFrame, daily_target: float, daily_loss: f
 
     metrics = {
         "days": len(sim_df),
-        "target_first_rate": (sim_df["outcome"] == "target_first").mean() * 100,
-        "loss_first_rate": (sim_df["outcome"] == "loss_first").mean() * 100,
-        "neither_rate": (sim_df["outcome"] == "neither").mean() * 100,
-        "avg_daily_result": sim_df["simulated_day_result"].mean(),
-        "median_daily_result": sim_df["simulated_day_result"].median(),
-        "total_simulated_pnl": sim_df["simulated_day_result"].sum(),
-        "best_day": sim_df["simulated_day_result"].max(),
-        "worst_day": sim_df["simulated_day_result"].min(),
+        "target_first_rate": (sim_df["resultado"] == "meta_primero").mean() * 100,
+        "loss_first_rate": (sim_df["resultado"] == "perdida_primero").mean() * 100,
+        "neither_rate": (sim_df["resultado"] == "ninguno").mean() * 100,
+        "avg_daily_result": sim_df["resultado_diario_simulado"].mean(),
+        "median_daily_result": sim_df["resultado_diario_simulado"].median(),
+        "total_simulated_pnl": sim_df["resultado_diario_simulado"].sum(),
+        "best_day": sim_df["resultado_diario_simulado"].max(),
+        "worst_day": sim_df["resultado_diario_simulado"].min(),
     }
     return sim_df, metrics
 
@@ -270,23 +295,43 @@ def max_streak(series: pd.Series, positive: bool = True) -> int:
 
 
 def render_overview(ops_df: pd.DataFrame):
-    st.subheader("Bot Health")
+    st.subheader("Salud del Bot")
     metrics = compute_overview_metrics(ops_df)
     if not metrics:
-        st.info("No operation data found.")
+        st.info("No se encontraron datos de operaciones.")
         return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Operations", f"{metrics['total_operations']}")
-    c2.metric("Total Net PnL", f"{metrics['total_net_pnl']:.2f}")
-    c3.metric("Win Rate %", f"{metrics['win_rate']:.1f}")
-    c4.metric("Profit Factor", "-" if pd.isna(metrics['profit_factor']) else f"{metrics['profit_factor']:.2f}")
+    def card(title: str, value: str):
+        st.markdown(
+            f"""
+            <div class="lab-card">
+                <div class="lab-card-title">{title}</div>
+                <div class="lab-card-value">{value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Avg PnL", f"{metrics['avg_pnl']:.2f}")
-    c6.metric("Median PnL", f"{metrics['median_pnl']:.2f}")
-    c7.metric("Best Op", f"{metrics['best_operation']:.2f}")
-    c8.metric("Worst Op", f"{metrics['worst_operation']:.2f}")
+    row1 = st.columns(4)
+    with row1[0]:
+        card("Operaciones", f"{metrics['total_operations']}")
+    with row1[1]:
+        card("PnL Neto Total", f"{metrics['total_net_pnl']:.2f}")
+    with row1[2]:
+        card("Tasa de Acierto %", f"{metrics['win_rate']:.1f}")
+    with row1[3]:
+        pf = "-" if pd.isna(metrics["profit_factor"]) else f"{metrics['profit_factor']:.2f}"
+        card("Profit Factor", pf)
+
+    row2 = st.columns(4)
+    with row2[0]:
+        card("PnL Promedio", f"{metrics['avg_pnl']:.2f}")
+    with row2[1]:
+        card("PnL Mediano", f"{metrics['median_pnl']:.2f}")
+    with row2[2]:
+        card("Mejor Op", f"{metrics['best_operation']:.2f}")
+    with row2[3]:
+        card("Peor Op", f"{metrics['worst_operation']:.2f}")
 
     daily = (
         ops_df.groupby("trade_day", as_index=False)["sequence_net_pnl_currency"]
@@ -296,75 +341,77 @@ def render_overview(ops_df: pd.DataFrame):
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(daily["trade_day"].astype(str), daily["sequence_net_pnl_currency"])
-    ax.set_title("Daily Net PnL")
+    ax.set_title("PnL Neto Diario")
     ax.set_ylabel("PnL")
     ax.tick_params(axis="x", rotation=45)
     st.pyplot(fig)
 
 
 def render_reversal_engine(ops_df: pd.DataFrame):
-    st.subheader("Reversal Engine")
+    st.subheader("Motor de Reversiones")
     if ops_df.empty:
-        st.info("No operation data found.")
+        st.info("No se encontraron datos de operaciones.")
         return
 
     grouped = ops_df.groupby("reversal_count").agg(
-        operations=("operation_id", "count"),
-        total_pnl=("sequence_net_pnl_currency", "sum"),
-        avg_pnl=("sequence_net_pnl_currency", "mean"),
-        win_rate=("is_winner", "mean"),
-        avg_drawdown=("operation_max_drawdown_currency", "mean"),
-        avg_loss_before_recovery=("sequence_loss_currency", "mean"),
+        operaciones=("operation_id", "count"),
+        pnl_total=("sequence_net_pnl_currency", "sum"),
+        pnl_promedio=("sequence_net_pnl_currency", "mean"),
+        tasa_acierto=("es_ganadora", "mean"),
+        drawdown_promedio=("operation_max_drawdown_currency", "mean"),
+        perdida_promedio_antes_recuperacion=("sequence_loss_currency", "mean"),
     ).reset_index()
-    grouped["win_rate"] = grouped["win_rate"] * 100
+
+    grouped["tasa_acierto"] = grouped["tasa_acierto"] * 100
+    grouped = grouped.rename(columns={"reversal_count": "reversiones"})
 
     st.dataframe(grouped, use_container_width=True)
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.bar(grouped["reversal_count"].astype(str), grouped["total_pnl"])
-    ax.set_title("Total PnL by Reversal Count")
-    ax.set_xlabel("Reversal Count")
-    ax.set_ylabel("Total PnL")
+    ax.bar(grouped["reversiones"].astype(str), grouped["pnl_total"])
+    ax.set_title("PnL Total por Cantidad de Reversiones")
+    ax.set_xlabel("Cantidad de Reversiones")
+    ax.set_ylabel("PnL Total")
     st.pyplot(fig)
 
 
 def render_daily_goal_simulator(ops_df: pd.DataFrame):
-    st.subheader("Daily Goal Simulator")
+    st.subheader("Simulador de Meta Diaria")
     if ops_df.empty:
-        st.info("No operation data found.")
+        st.info("No se encontraron datos de operaciones.")
         return
 
     c1, c2 = st.columns(2)
-    daily_target = c1.number_input("Daily Target", min_value=1.0, value=600.0, step=50.0)
-    daily_loss = c2.number_input("Daily Max Loss", min_value=1.0, value=300.0, step=50.0)
+    daily_target = c1.number_input("Meta Diaria", min_value=1.0, value=600.0, step=50.0)
+    daily_loss = c2.number_input("Pérdida Máxima Diaria", min_value=1.0, value=300.0, step=50.0)
 
     sim_df, metrics = simulate_daily_plan(ops_df, daily_target=daily_target, daily_loss=daily_loss)
     if not metrics:
-        st.info("Not enough data to simulate.")
+        st.info("No hay suficientes datos para simular.")
         return
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Target First %", f"{metrics['target_first_rate']:.1f}")
-    c2.metric("Loss First %", f"{metrics['loss_first_rate']:.1f}")
-    c3.metric("Neither %", f"{metrics['neither_rate']:.1f}")
-    c4.metric("Avg Daily Result", f"{metrics['avg_daily_result']:.2f}")
+    c1.metric("Meta Primero %", f"{metrics['target_first_rate']:.1f}")
+    c2.metric("Pérdida Primero %", f"{metrics['loss_first_rate']:.1f}")
+    c3.metric("Ninguno %", f"{metrics['neither_rate']:.1f}")
+    c4.metric("Resultado Diario Promedio", f"{metrics['avg_daily_result']:.2f}")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Total Simulated PnL", f"{metrics['total_simulated_pnl']:.2f}")
-    c6.metric("Median Daily Result", f"{metrics['median_daily_result']:.2f}")
-    c7.metric("Best Day", f"{metrics['best_day']:.2f}")
-    c8.metric("Worst Day", f"{metrics['worst_day']:.2f}")
+    c5.metric("PnL Simulado Total", f"{metrics['total_simulated_pnl']:.2f}")
+    c6.metric("Resultado Diario Mediano", f"{metrics['median_daily_result']:.2f}")
+    c7.metric("Mejor Día", f"{metrics['best_day']:.2f}")
+    c8.metric("Peor Día", f"{metrics['worst_day']:.2f}")
 
     if not sim_df.empty:
         ordered = sim_df.sort_values("trade_day")
-        win_streak = max_streak(ordered["simulated_day_result"], positive=True)
-        loss_streak = max_streak(ordered["simulated_day_result"], positive=False)
-        st.write(f"Max winning streak of days: **{win_streak}**")
-        st.write(f"Max losing streak of days: **{loss_streak}**")
+        win_streak = max_streak(ordered["resultado_diario_simulado"], positive=True)
+        loss_streak = max_streak(ordered["resultado_diario_simulado"], positive=False)
+        st.write(f"Racha máxima de días ganadores: **{win_streak}**")
+        st.write(f"Racha máxima de días perdedores: **{loss_streak}**")
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(ordered["trade_day"].astype(str), ordered["simulated_day_result"])
-        ax.set_title("Simulated Daily Results")
+        ax.plot(ordered["trade_day"].astype(str), ordered["resultado_diario_simulado"])
+        ax.set_title("Resultados Diarios Simulados")
         ax.set_ylabel("PnL")
         ax.tick_params(axis="x", rotation=45)
         st.pyplot(fig)
@@ -373,9 +420,9 @@ def render_daily_goal_simulator(ops_df: pd.DataFrame):
 
 
 def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
-    st.subheader("Operation Explorer")
+    st.subheader("Explorador de Operaciones")
     if ops_df.empty:
-        st.info("No operation data found.")
+        st.info("No se encontraron datos de operaciones.")
         return
 
     display_cols = [
@@ -394,7 +441,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.dataframe(ops_df[display_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
 
     op_ids = ops_df["operation_id"].dropna().tolist()
-    selected_op = st.selectbox("Inspect operation", op_ids)
+    selected_op = st.selectbox("Inspeccionar operación", op_ids)
     if selected_op:
         op_row = ops_df.loc[ops_df["operation_id"] == selected_op]
         st.write(op_row)
@@ -405,11 +452,11 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
 
 def main():
-    st.title("lol_wlf Python Lab")
-    st.caption("Decision-oriented analytics for your bot")
+    st.title("Laboratorio Python de lol_wlf")
+    st.caption("Analítica orientada a decisiones para tu bot")
 
     uploaded_files = st.sidebar.file_uploader(
-        "Load monthly JSONL files",
+        "Cargar archivos JSONL mensuales",
         type=["jsonl"],
         accept_multiple_files=True,
     )
@@ -418,30 +465,30 @@ def main():
     ops_df, legs_df = build_dataframes(records)
 
     if ops_df.empty:
-        st.warning("No JSONL records loaded. Upload one or more monthly JSONL files, for example 2026-01.jsonl through 2026-06.jsonl.")
+        st.warning("No se cargaron registros JSONL. Sube uno o más archivos JSONL mensuales, por ejemplo desde 2026-01.jsonl hasta 2026-06.jsonl.")
         return
 
-    st.sidebar.metric("Loaded files", f"{len(uploaded_files)}")
-    st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
-    st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
+    st.sidebar.metric("Archivos cargados", f"{len(uploaded_files)}")
+    st.sidebar.metric("Operaciones cargadas", f"{len(ops_df)}")
+    st.sidebar.metric("Piernas cargadas", f"{len(legs_df)}")
 
     page = st.sidebar.radio(
-        "Page",
+        "Página",
         [
-            "Overview",
-            "Reversal Engine",
-            "Daily Goal Simulator",
-            "Operation Explorer",
+            "Resumen",
+            "Motor de Reversiones",
+            "Simulador de Meta Diaria",
+            "Explorador de Operaciones",
         ],
     )
 
-    if page == "Overview":
+    if page == "Resumen":
         render_overview(ops_df)
-    elif page == "Reversal Engine":
+    elif page == "Motor de Reversiones":
         render_reversal_engine(ops_df)
-    elif page == "Daily Goal Simulator":
+    elif page == "Simulador de Meta Diaria":
         render_daily_goal_simulator(ops_df)
-    elif page == "Operation Explorer":
+    elif page == "Explorador de Operaciones":
         render_operation_explorer(ops_df, legs_df)
 
 
