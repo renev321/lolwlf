@@ -395,18 +395,18 @@ def main():
     "Load monthly JSONL files",
     type=["jsonl"],
     accept_multiple_files=True,
-)
+    )
 
-records = load_uploaded_jsonl_files(uploaded_files)
-ops_df, legs_df = build_dataframes(records)
-
-if ops_df.empty:
-    st.warning("No JSONL records loaded. Upload one or more monthly JSONL files, for example 2026-01.jsonl through 2026-06.jsonl.")
-    return
-
-st.sidebar.metric("Loaded files", f"{len(uploaded_files)}")
-st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
-st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
+    records = load_uploaded_jsonl_files(uploaded_files)
+    ops_df, legs_df = build_dataframes(records)
+    
+    if ops_df.empty:
+        st.warning("No JSONL records loaded. Upload one or more monthly JSONL files, for example 2026-01.jsonl through 2026-06.jsonl.")
+        return
+    
+    st.sidebar.metric("Loaded files", f"{len(uploaded_files)}")
+    st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
+    st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
 
     page = st.sidebar.radio(
         "Page",
