@@ -963,6 +963,10 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             filtro_df["operation_id"].astype(str).str.contains(texto_busqueda.strip(), case=False, na=False)
         ]
 
+    if filtro_df.empty:
+        st.warning("No hay operaciones que cumplan con los filtros actuales.")
+        return
+
     # Nuevo cálculo: pnl simulado según cap de reversal
     filtro_df = filtro_df.copy()
     filtro_df["pnl_simulado_cap_reversal"] = filtro_df.apply(
@@ -979,6 +983,10 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         filtro_df["reversal_count"].fillna(0) <= max_reversal_permitido
     ].copy()
 
+    if filtro_df_visible.empty:
+        st.warning("No hay operaciones visibles con el máximo reversal permitido actual.")
+        return
+
     st.markdown("### Resultado filtrado")
 
     c1, c2, c3 = st.columns(3)
@@ -991,10 +999,6 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         "PnL Simulado Cap",
         f"{filtro_df['pnl_simulado_cap_reversal'].sum():.2f}" if not filtro_df.empty else "0.00",
     )
-
-    if filtro_df.empty:
-        st.warning("No hay operaciones que cumplan con los filtros actuales.")
-        return
 
     display_cols = [
         "operation_id",
@@ -1014,12 +1018,12 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     ]
 
     st.dataframe(
-        filtro_df[display_cols].sort_values("sequence_started_at", ascending=False),
+        filtro_df_visible[display_cols].sort_values("sequence_started_at", ascending=False),
         use_container_width=True,
     )
 
     op_ids = (
-        filtro_df.sort_values("sequence_started_at", ascending=False)["operation_id"]
+        filtro_df_visible.sort_values("sequence_started_at", ascending=False)["operation_id"]
         .dropna()
         .astype(str)
         .tolist()
@@ -1028,7 +1032,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     selected_op = st.selectbox("Inspeccionar operación", op_ids)
 
     if selected_op:
-        op_row = filtro_df.loc[filtro_df["operation_id"] == selected_op]
+        op_row = filtro_df_visible.loc[filtro_df_visible["operation_id"] == selected_op]
         st.markdown("### Resumen de la operación")
         st.dataframe(op_row, use_container_width=True)
 
