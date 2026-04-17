@@ -19,7 +19,7 @@ def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
 
     for uploaded_file in uploaded_files:
         try:
-            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            content = uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
             lines = content.splitlines()
 
             st.sidebar.write(f"File: {uploaded_file.name}")
