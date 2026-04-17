@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from typing import Tuple
 
 import numpy as np
@@ -10,25 +9,29 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="lol_wlf Lab", layout="wide")
 
-REPORTS_DIR_DEFAULT = Path.home() / "Documents" / "NinjaTrader 8" / "bin" / "Custom" / "lol_wlf" / "reports"
 # Fallback reminder: user may need to point this to NinjaTrader/Core/Globals.UserDataDir/lol_wlf/reports
 
 
-def load_monthly_jsonl_reports(reports_dir: Path) -> list[dict]:
+def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
     records: list[dict] = []
-    if not reports_dir.exists():
+    if not uploaded_files:
         return records
 
-    for file_path in sorted(reports_dir.glob("*.jsonl")):
-        with file_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    for uploaded_file in uploaded_files:
+        try:
+            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
     return records
 
 
@@ -388,18 +391,22 @@ def main():
     st.title("lol_wlf Python Lab")
     st.caption("Decision-oriented analytics for your bot")
 
-    reports_dir_str = st.sidebar.text_input("Reports folder", str(REPORTS_DIR_DEFAULT))
-    reports_dir = Path(reports_dir_str)
+    uploaded_files = st.sidebar.file_uploader(
+    "Load monthly JSONL files",
+    type=["jsonl"],
+    accept_multiple_files=True,
+)
 
-    records = load_monthly_jsonl_reports(reports_dir)
-    ops_df, legs_df = build_dataframes(records)
+records = load_uploaded_jsonl_files(uploaded_files)
+ops_df, legs_df = build_dataframes(records)
 
-    if ops_df.empty:
-        st.warning("No JSONL records found. Point the app to your lol_wlf reports folder.")
-        return
+if ops_df.empty:
+    st.warning("No JSONL records loaded. Upload one or more monthly JSONL files, for example 2026-01.jsonl through 2026-06.jsonl.")
+    return
 
-    st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
-    st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
+st.sidebar.metric("Loaded files", f"{len(uploaded_files)}")
+st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
+st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
 
     page = st.sidebar.radio(
         "Page",
