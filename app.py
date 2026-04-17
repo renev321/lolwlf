@@ -1001,7 +1001,7 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones que cumplan con los filtros actuales.")
         return
 
-    # Nuevo cálculo: pnl simulado según cap de reversal
+    # Calcula el pnl simulado bajo el cap elegido
     filtro_df = filtro_df.copy()
     filtro_df["pnl_simulado_cap_reversal"] = filtro_df.apply(
         lambda row: calcular_pnl_simulado_por_cap_reversal(
@@ -1027,11 +1027,11 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     c1.metric("Operaciones visibles", f"{len(filtro_df_visible)}")
     c2.metric(
         "PnL Real Visible",
-        f"{filtro_df_visible['sequence_net_pnl_currency'].sum():.2f}" if not filtro_df_visible.empty else "0.00",
+        f"{filtro_df_visible['sequence_net_pnl_currency'].sum():.2f}",
     )
     c3.metric(
         "PnL Simulado Cap",
-        f"{filtro_df['pnl_simulado_cap_reversal'].sum():.2f}" if not filtro_df.empty else "0.00",
+        f"{filtro_df['pnl_simulado_cap_reversal'].sum():.2f}",
     )
 
     display_cols = [
