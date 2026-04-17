@@ -333,6 +333,40 @@ def max_streak(series: pd.Series, positive: bool = True) -> int:
             current = 0
     return best
 
+def calcular_pnl_simulado_por_cap_reversal(
+    op_row: pd.Series,
+    legs_df: pd.DataFrame,
+    max_reversal_permitido: int,
+) -> float:
+    operation_id = op_row["operation_id"]
+    reversal_count_real = int(op_row["reversal_count"]) if pd.notna(op_row["reversal_count"]) else 0
+
+    # Si la operación real ya está dentro del cap, usamos el pnl real
+    if reversal_count_real <= max_reversal_permitido:
+        return float(op_row["sequence_net_pnl_currency"])
+
+    legs_op = legs_df.loc[legs_df["operation_id"] == operation_id].copy()
+    if legs_op.empty:
+        return float(op_row["sequence_net_pnl_currency"])
+
+    legs_op = legs_op.sort_values("leg_index")
+
+    # Base leg = reversal_number 0
+    target_reversal = max_reversal_permitido
+
+    leg_target = legs_op.loc[legs_op["reversal_number"] == target_reversal].copy()
+
+    if leg_target.empty:
+        return float(op_row["sequence_net_pnl_currency"])
+
+    leg_target = leg_target.sort_values("leg_index").iloc[-1]
+    pnl_simulado = leg_target["cumulative_sequence_pnl_after_leg"]
+
+    if pd.isna(pnl_simulado):
+        return float(op_row["sequence_net_pnl_currency"])
+
+    return float(pnl_simulado)
+
 
 def render_overview(ops_df: pd.DataFrame):
     st.subheader("Salud del Bot")
