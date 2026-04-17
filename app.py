@@ -502,9 +502,9 @@ def render_session_intelligence(ops_df: pd.DataFrame):
     session_df["tasa_acierto"] = session_df["tasa_acierto"] * 100
 
     if len(session_df) == 1:
-    st.info("Por ahora solo hay una sesión en los datos cargados. Cuando cargues más meses o más horarios, esta vista se volverá mucho más útil.")
-    st.dataframe(session_df, use_container_width=True)
-    return
+        st.info("Por ahora solo hay una sesión en los datos cargados. Cuando cargues más meses o más horarios, esta vista se volverá mucho más útil.")
+        st.dataframe(session_df, use_container_width=True)
+        return
 
     st.dataframe(session_df, use_container_width=True)
 
