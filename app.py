@@ -276,17 +276,59 @@ def render_overview(ops_df: pd.DataFrame):
         st.info("No operation data found.")
         return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Operations", f"{metrics['total_operations']}")
-    c2.metric("Total Net PnL", f"{metrics['total_net_pnl']:.2f}")
-    c3.metric("Win Rate %", f"{metrics['win_rate']:.1f}")
-    c4.metric("Profit Factor", "-" if pd.isna(metrics['profit_factor']) else f"{metrics['profit_factor']:.2f}")
+    st.markdown("""
+    <style>
+    .lab-card {
+        border: 1px solid rgba(128,128,128,0.25);
+        border-radius: 16px;
+        padding: 16px 18px;
+        min-height: 110px;
+        background: rgba(255,255,255,0.02);
+    }
+    .lab-card-title {
+        font-size: 0.95rem;
+        opacity: 0.8;
+        margin-bottom: 10px;
+    }
+    .lab-card-value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        line-height: 1.1;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Avg PnL", f"{metrics['avg_pnl']:.2f}")
-    c6.metric("Median PnL", f"{metrics['median_pnl']:.2f}")
-    c7.metric("Best Op", f"{metrics['best_operation']:.2f}")
-    c8.metric("Worst Op", f"{metrics['worst_operation']:.2f}")
+    def card(title: str, value: str):
+        st.markdown(
+            f"""
+            <div class="lab-card">
+                <div class="lab-card-title">{title}</div>
+                <div class="lab-card-value">{value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    row1 = st.columns(4)
+    with row1[0]:
+        card("Operations", f"{metrics['total_operations']}")
+    with row1[1]:
+        card("Total Net PnL", f"{metrics['total_net_pnl']:.2f}")
+    with row1[2]:
+        card("Win Rate %", f"{metrics['win_rate']:.1f}")
+    with row1[3]:
+        pf = "-" if pd.isna(metrics["profit_factor"]) else f"{metrics['profit_factor']:.2f}"
+        card("Profit Factor", pf)
+
+    row2 = st.columns(4)
+    with row2[0]:
+        card("Avg PnL", f"{metrics['avg_pnl']:.2f}")
+    with row2[1]:
+        card("Median PnL", f"{metrics['median_pnl']:.2f}")
+    with row2[2]:
+        card("Best Op", f"{metrics['best_operation']:.2f}")
+    with row2[3]:
+        card("Worst Op", f"{metrics['worst_operation']:.2f}")
 
     daily = (
         ops_df.groupby("trade_day", as_index=False)["sequence_net_pnl_currency"]
