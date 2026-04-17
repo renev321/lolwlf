@@ -9,28 +9,45 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="lol_wlf Lab", layout="wide")
 
-# Fallback reminder: user may need to point this to NinjaTrader/Core/Globals.UserDataDir/lol_wlf/reports
-
 
 def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
     records: list[dict] = []
+
     if not uploaded_files:
+        st.sidebar.info("No files uploaded yet.")
         return records
 
     for uploaded_file in uploaded_files:
         try:
             content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-        except Exception:
-            continue
+            lines = content.splitlines()
 
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            st.sidebar.write(f"File: {uploaded_file.name}")
+            st.sidebar.write(f"Raw lines: {len(lines)}")
+
+            valid_count = 0
+            invalid_count = 0
+
+            for i, line in enumerate(lines, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    obj = json.loads(line)
+                    records.append(obj)
+                    valid_count += 1
+                except json.JSONDecodeError as e:
+                    invalid_count += 1
+                    if invalid_count <= 3:
+                        st.sidebar.write(f"Invalid JSON line {i}: {line[:120]}")
+                        st.sidebar.write(f"Error: {e}")
+
+            st.sidebar.write(f"Valid records: {valid_count}")
+            st.sidebar.write(f"Invalid lines: {invalid_count}")
+
+        except Exception as e:
+            st.sidebar.error(f"Failed reading {uploaded_file.name}: {e}")
 
     return records
 
@@ -392,18 +409,18 @@ def main():
     st.caption("Decision-oriented analytics for your bot")
 
     uploaded_files = st.sidebar.file_uploader(
-    "Load monthly JSONL files",
-    type=["jsonl"],
-    accept_multiple_files=True,
+        "Load monthly JSONL files",
+        type=["jsonl"],
+        accept_multiple_files=True,
     )
 
     records = load_uploaded_jsonl_files(uploaded_files)
     ops_df, legs_df = build_dataframes(records)
-    
+
     if ops_df.empty:
         st.warning("No JSONL records loaded. Upload one or more monthly JSONL files, for example 2026-01.jsonl through 2026-06.jsonl.")
         return
-    
+
     st.sidebar.metric("Loaded files", f"{len(uploaded_files)}")
     st.sidebar.metric("Loaded operations", f"{len(ops_df)}")
     st.sidebar.metric("Loaded legs", f"{len(legs_df)}")
