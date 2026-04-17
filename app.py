@@ -333,6 +333,57 @@ def max_streak(series: pd.Series, positive: bool = True) -> int:
             current = 0
     return best
 
+def calcular_resultado_simulado_por_cap_reversal(
+    op_row: pd.Series,
+    legs_df: pd.DataFrame,
+    max_reversal_permitido: int,
+) -> dict:
+    operation_id = op_row["operation_id"]
+    reversal_count_real = int(op_row["reversal_count"]) if pd.notna(op_row["reversal_count"]) else 0
+
+    # Si la operación real ya está dentro del cap, se mantiene igual
+    if reversal_count_real <= max_reversal_permitido:
+        return {
+            "reversal_count_simulado": reversal_count_real,
+            "sequence_end_reason_simulado": op_row["sequence_end_reason"],
+            "sequence_net_pnl_simulado": float(op_row["sequence_net_pnl_currency"]),
+        }
+
+    legs_op = legs_df.loc[legs_df["operation_id"] == operation_id].copy()
+    if legs_op.empty:
+        return {
+            "reversal_count_simulado": max_reversal_permitido,
+            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}",
+            "sequence_net_pnl_simulado": float(op_row["sequence_net_pnl_currency"]),
+        }
+
+    legs_op = legs_op.sort_values("leg_index")
+
+    # Base = reversal_number 0, luego reversal 1, 2, 3...
+    leg_target = legs_op.loc[legs_op["reversal_number"] == max_reversal_permitido].copy()
+
+    if leg_target.empty:
+        return {
+            "reversal_count_simulado": max_reversal_permitido,
+            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}",
+            "sequence_net_pnl_simulado": float(op_row["sequence_net_pnl_currency"]),
+        }
+
+    leg_target = leg_target.sort_values("leg_index").iloc[-1]
+
+    pnl_simulado = leg_target["cumulative_sequence_pnl_after_leg"]
+    if pd.isna(pnl_simulado):
+        pnl_simulado = op_row["sequence_net_pnl_currency"]
+
+    # Tomamos el motivo de salida de esa pierna; si no existe, marcamos cap
+    exit_reason = leg_target["exit_reason"] if pd.notna(leg_target["exit_reason"]) and str(leg_target["exit_reason"]).strip() else f"CAP_{max_reversal_permitido}"
+
+    return {
+        "reversal_count_simulado": max_reversal_permitido,
+        "sequence_end_reason_simulado": str(exit_reason),
+        "sequence_net_pnl_simulado": float(pnl_simulado),
+    }
+
 def calcular_pnl_simulado_por_cap_reversal(
     op_row: pd.Series,
     legs_df: pd.DataFrame,
