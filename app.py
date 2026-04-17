@@ -812,17 +812,113 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("Explorador de Operaciones")
     mostrar_bloque_ayuda(
         "Explorador de Operaciones",
-        "Esta página sirve para abrir operaciones concretas y entender su historia completa: entrada base, reversals, qty, salidas y evolución del PnL acumulado.",
+        "Esta página sirve para abrir operaciones concretas y entender su historia completa: entrada base, reversals, qty, salidas y evolución del PnL acumulado. Como aquí puede haber muchísimas operaciones, los filtros son clave.",
         [
             "¿Qué pasó exactamente en una operación específica?",
             "¿Cuántos reversals necesitó?",
             "¿Qué tamaño tomó cada pierna?",
             "¿Cómo evolucionó el PnL durante la secuencia?",
+            "¿Qué operaciones quiero revisar por fecha, sesión o tipo de cierre?",
         ],
     )
 
     if ops_df.empty:
         st.info("No se encontraron datos de operaciones.")
+        return
+
+    filtro_df = ops_df.copy()
+
+    st.markdown("### Filtros")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        min_date = filtro_df["sequence_started_at"].min()
+        max_date = filtro_df["sequence_started_at"].max()
+
+        fecha_inicio = st.date_input(
+            "Fecha inicial",
+            value=min_date.date() if pd.notna(min_date) else None,
+        )
+
+        sesiones_disponibles = sorted([s for s in filtro_df["sesion"].dropna().unique().tolist()])
+        sesiones_sel = st.multiselect(
+            "Sesiones",
+            options=sesiones_disponibles,
+            default=sesiones_disponibles,
+        )
+
+        razones_disponibles = sorted([r for r in filtro_df["sequence_end_reason"].dropna().unique().tolist()])
+        razones_sel = st.multiselect(
+            "Razón de cierre",
+            options=razones_disponibles,
+            default=razones_disponibles,
+        )
+
+    with c2:
+        fecha_fin = st.date_input(
+            "Fecha final",
+            value=max_date.date() if pd.notna(max_date) else None,
+        )
+
+        reversals_disponibles = sorted(
+            [int(x) for x in filtro_df["reversal_count"].dropna().unique().tolist()]
+        )
+        reversals_sel = st.multiselect(
+            "Cantidad de reversals",
+            options=reversals_disponibles,
+            default=reversals_disponibles,
+        )
+
+        numeros_op_disponibles = sorted(
+            [int(x) for x in filtro_df["numero_operacion_dia"].dropna().unique().tolist()]
+        )
+        numeros_op_sel = st.multiselect(
+            "Número de operación del día",
+            options=numeros_op_disponibles,
+            default=numeros_op_disponibles,
+        )
+
+    texto_busqueda = st.text_input("Buscar por operation_id", "")
+
+    if fecha_inicio:
+        filtro_df = filtro_df[filtro_df["sequence_started_at"].dt.date >= fecha_inicio]
+
+    if fecha_fin:
+        filtro_df = filtro_df[filtro_df["sequence_started_at"].dt.date <= fecha_fin]
+
+    if sesiones_sel:
+        filtro_df = filtro_df[filtro_df["sesion"].isin(sesiones_sel)]
+
+    if razones_sel:
+        filtro_df = filtro_df[filtro_df["sequence_end_reason"].isin(razones_sel)]
+
+    if reversals_sel:
+        filtro_df = filtro_df[filtro_df["reversal_count"].isin(reversals_sel)]
+
+    if numeros_op_sel:
+        filtro_df = filtro_df[filtro_df["numero_operacion_dia"].isin(numeros_op_sel)]
+
+    if texto_busqueda.strip():
+        filtro_df = filtro_df[
+            filtro_df["operation_id"].astype(str).str.contains(texto_busqueda.strip(), case=False, na=False)
+        ]
+
+    st.markdown("### Resultado filtrado")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Operaciones filtradas", f"{len(filtro_df)}")
+    c2.metric(
+        "PnL Neto Filtrado",
+        f"{filtro_df['sequence_net_pnl_currency'].sum():.2f}" if not filtro_df.empty else "0.00",
+    )
+    c3.metric(
+        "PnL Promedio Filtrado",
+        f"{filtro_df['sequence_net_pnl_currency'].mean():.2f}" if not filtro_df.empty else "0.00",
+    )
+
+    if filtro_df.empty:
+        st.warning("No hay operaciones que cumplan con los filtros actuales.")
         return
 
     display_cols = [
@@ -840,17 +936,54 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         "sesion",
         "numero_operacion_dia",
     ]
-    st.dataframe(ops_df[display_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
 
-    op_ids = ops_df["operation_id"].dropna().tolist()
+    st.dataframe(
+        filtro_df[display_cols].sort_values("sequence_started_at", ascending=False),
+        use_container_width=True,
+    )
+
+    op_ids = (
+        filtro_df.sort_values("sequence_started_at", ascending=False)["operation_id"]
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
+
     selected_op = st.selectbox("Inspeccionar operación", op_ids)
+
     if selected_op:
-        op_row = ops_df.loc[ops_df["operation_id"] == selected_op]
-        st.write(op_row)
-        st.dataframe(
-            legs_df.loc[legs_df["operation_id"] == selected_op].sort_values("leg_index"),
-            use_container_width=True,
+        op_row = filtro_df.loc[filtro_df["operation_id"] == selected_op]
+        st.markdown("### Resumen de la operación")
+        st.dataframe(op_row, use_container_width=True)
+
+        st.markdown("### Piernas de la operación")
+        legs_op = legs_df.loc[legs_df["operation_id"] == selected_op].sort_values("leg_index")
+        st.dataframe(legs_op, use_container_width=True)
+
+        if not legs_op.empty:
+            fig, ax = plt.subplots(figsize=(9, 4))
+            ax.plot(
+                legs_op["leg_index"].astype(str),
+                legs_op["cumulative_sequence_pnl_after_leg"],
+                marker="o",
+            )
+            ax.set_title("Evolución del PnL Acumulado por Pierna")
+            ax.set_xlabel("Pierna")
+            ax.set_ylabel("PnL Acumulado")
+            st.pyplot(fig)
+
+        lineas = []
+        fila = op_row.iloc[0]
+        lineas.append(
+            f"Esta operación terminó con {int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0} reversal(es)."
         )
+        lineas.append(
+            f"El resultado neto de la operación fue {fila['sequence_net_pnl_currency']:.2f}."
+        )
+        lineas.append(
+            f"La sesión clasificada para esta operación es {fila['sesion']}."
+        )
+        mostrar_bloque_conclusion("Explorador de Operaciones", lineas)
 
 
 def main():
