@@ -77,6 +77,33 @@ def load_uploaded_jsonl_files(uploaded_files) -> list[dict]:
     return records
 
 
+def _clasificar_sesion(ts: pd.Timestamp) -> str:
+    if pd.isna(ts):
+        return "Sin sesión"
+
+    h = ts.hour
+    m = ts.minute
+    total_min = h * 60 + m
+
+    # Asia: 18:00–03:29
+    if total_min >= 18 * 60 or total_min <= (3 * 60 + 29):
+        return "Asia"
+    # Londres: 03:30–09:29
+    if (3 * 60 + 30) <= total_min <= (9 * 60 + 29):
+        return "Londres"
+    # NY Open: 09:30–10:30
+    if (9 * 60 + 30) <= total_min <= (10 * 60 + 30):
+        return "NY Open"
+    # NY Midday: 10:31–13:29
+    if (10 * 60 + 31) <= total_min <= (13 * 60 + 29):
+        return "NY Midday"
+    # NY Late: 13:30–17:00
+    if (13 * 60 + 30) <= total_min <= (17 * 60):
+        return "NY Late"
+
+    return "Fuera de Sesión"
+
+
 def build_dataframes(records: list[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if not records:
         return pd.DataFrame(), pd.DataFrame()
@@ -198,7 +225,11 @@ def build_dataframes(records: list[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ops_df["trade_day"] = ops_df["sequence_started_at"].dt.date
     ops_df["hora_inicio"] = ops_df["sequence_started_at"].dt.hour
     ops_df["minuto_inicio"] = ops_df["sequence_started_at"].dt.minute
+    ops_df["dia_semana"] = ops_df["sequence_started_at"].dt.day_name()
+    ops_df["sesion"] = ops_df["sequence_started_at"].apply(_clasificar_sesion)
     ops_df["es_ganadora"] = ops_df["sequence_net_pnl_currency"] > 0
+    ops_df = ops_df.sort_values("sequence_started_at").copy()
+    ops_df["numero_operacion_dia"] = ops_df.groupby("trade_day").cumcount() + 1
 
     return ops_df, legs_df
 
@@ -361,7 +392,6 @@ def render_reversal_engine(ops_df: pd.DataFrame):
         drawdown_promedio=("operation_max_drawdown_currency", "mean"),
         perdida_promedio_antes_recuperacion=("sequence_loss_currency", "mean"),
     ).reset_index()
-
     grouped["tasa_acierto"] = grouped["tasa_acierto"] * 100
     grouped = grouped.rename(columns={"reversal_count": "reversiones"})
 
@@ -419,6 +449,157 @@ def render_daily_goal_simulator(ops_df: pd.DataFrame):
         st.dataframe(ordered, use_container_width=True)
 
 
+def render_time_edge(ops_df: pd.DataFrame):
+    st.subheader("Ventaja Temporal")
+    if ops_df.empty:
+        st.info("No se encontraron datos de operaciones.")
+        return
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**PnL por día de la semana**")
+        weekday = ops_df.groupby("dia_semana", as_index=False).agg(
+            pnl_total=("sequence_net_pnl_currency", "sum"),
+            operaciones=("operation_id", "count"),
+            tasa_acierto=("es_ganadora", "mean"),
+        )
+        weekday["tasa_acierto"] = weekday["tasa_acierto"] * 100
+        st.dataframe(weekday, use_container_width=True)
+
+    with col2:
+        st.markdown("**PnL por hora**")
+        by_hour = ops_df.groupby("hora_inicio", as_index=False).agg(
+            pnl_total=("sequence_net_pnl_currency", "sum"),
+            operaciones=("operation_id", "count"),
+            reversiones_promedio=("reversal_count", "mean"),
+            drawdown_promedio=("operation_max_drawdown_currency", "mean"),
+        )
+        st.dataframe(by_hour, use_container_width=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(by_hour["hora_inicio"].astype(str), by_hour["pnl_total"])
+    ax.set_title("PnL Total por Hora")
+    ax.set_xlabel("Hora de Inicio")
+    ax.set_ylabel("PnL")
+    st.pyplot(fig)
+
+
+def render_session_intelligence(ops_df: pd.DataFrame):
+    st.subheader("Inteligencia por Sesión")
+    if ops_df.empty:
+        st.info("No se encontraron datos de operaciones.")
+        return
+
+    session_df = ops_df.groupby("sesion", as_index=False).agg(
+        operaciones=("operation_id", "count"),
+        pnl_total=("sequence_net_pnl_currency", "sum"),
+        pnl_promedio=("sequence_net_pnl_currency", "mean"),
+        tasa_acierto=("es_ganadora", "mean"),
+        reversiones_promedio=("reversal_count", "mean"),
+        drawdown_promedio=("operation_max_drawdown_currency", "mean"),
+    )
+    session_df["tasa_acierto"] = session_df["tasa_acierto"] * 100
+
+    st.dataframe(session_df, use_container_width=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(session_df["sesion"], session_df["pnl_total"])
+    ax.set_title("PnL Total por Sesión")
+    ax.set_xlabel("Sesión")
+    ax.set_ylabel("PnL")
+    ax.tick_params(axis="x", rotation=25)
+    st.pyplot(fig)
+
+
+def render_crazy_mode_timing(ops_df: pd.DataFrame):
+    st.subheader("Timing de Crazy Mode")
+    if ops_df.empty:
+        st.info("No se encontraron datos de operaciones.")
+        return
+
+    timing_df = ops_df.groupby("numero_operacion_dia", as_index=False).agg(
+        operaciones=("operation_id", "count"),
+        pnl_total=("sequence_net_pnl_currency", "sum"),
+        pnl_promedio=("sequence_net_pnl_currency", "mean"),
+        tasa_acierto=("es_ganadora", "mean"),
+        reversiones_promedio=("reversal_count", "mean"),
+        drawdown_promedio=("operation_max_drawdown_currency", "mean"),
+    )
+    timing_df["tasa_acierto"] = timing_df["tasa_acierto"] * 100
+
+    st.dataframe(timing_df, use_container_width=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(timing_df["numero_operacion_dia"].astype(str), timing_df["pnl_total"])
+    ax.set_title("PnL Total por Número de Operación del Día")
+    ax.set_xlabel("Número de Operación del Día")
+    ax.set_ylabel("PnL")
+    st.pyplot(fig)
+
+
+def render_parameter_lab(ops_df: pd.DataFrame):
+    st.subheader("Laboratorio de Parámetros")
+    if ops_df.empty:
+        st.info("No se encontraron datos de operaciones.")
+        return
+
+    param = st.selectbox(
+        "Selecciona un parámetro",
+        ["fixed_stop_ticks", "fixed_target_ticks", "distance_points", "max_reversals_allowed"],
+    )
+
+    grouped = ops_df.groupby(param, as_index=False).agg(
+        operaciones=("operation_id", "count"),
+        pnl_total=("sequence_net_pnl_currency", "sum"),
+        pnl_promedio=("sequence_net_pnl_currency", "mean"),
+        tasa_acierto=("es_ganadora", "mean"),
+        drawdown_promedio=("operation_max_drawdown_currency", "mean"),
+    )
+    grouped["tasa_acierto"] = grouped["tasa_acierto"] * 100
+
+    st.dataframe(grouped, use_container_width=True)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(grouped[param].astype(str), grouped["pnl_total"])
+    ax.set_title(f"PnL Total por {param}")
+    ax.set_xlabel(param)
+    ax.set_ylabel("PnL")
+    ax.tick_params(axis="x", rotation=25)
+    st.pyplot(fig)
+
+
+def render_exit_engine(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
+    st.subheader("Motor de Salidas")
+    if legs_df.empty:
+        st.info("No se encontraron datos de piernas.")
+        return
+
+    exit_df = legs_df.groupby("exit_result_type", as_index=False).agg(
+        piernas=("operation_id", "count"),
+        pnl_total=("realized_pnl_currency", "sum"),
+        pnl_promedio=("realized_pnl_currency", "mean"),
+    )
+    st.dataframe(exit_df, use_container_width=True)
+
+    be_stats = legs_df.groupby("auto_be_activated", as_index=False).agg(
+        piernas=("operation_id", "count"),
+        pnl_promedio=("realized_pnl_currency", "mean"),
+    )
+    tr_stats = legs_df.groupby("trailing_activated", as_index=False).agg(
+        piernas=("operation_id", "count"),
+        pnl_promedio=("realized_pnl_currency", "mean"),
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Impacto de Auto BE**")
+        st.dataframe(be_stats, use_container_width=True)
+    with c2:
+        st.markdown("**Impacto del Trailing**")
+        st.dataframe(tr_stats, use_container_width=True)
+
+
 def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("Explorador de Operaciones")
     if ops_df.empty:
@@ -437,6 +618,8 @@ def render_operation_explorer(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         "fixed_stop_ticks",
         "fixed_target_ticks",
         "distance_points",
+        "sesion",
+        "numero_operacion_dia",
     ]
     st.dataframe(ops_df[display_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
 
@@ -478,6 +661,11 @@ def main():
             "Resumen",
             "Motor de Reversiones",
             "Simulador de Meta Diaria",
+            "Ventaja Temporal",
+            "Inteligencia por Sesión",
+            "Timing de Crazy Mode",
+            "Laboratorio de Parámetros",
+            "Motor de Salidas",
             "Explorador de Operaciones",
         ],
     )
@@ -488,6 +676,16 @@ def main():
         render_reversal_engine(ops_df)
     elif page == "Simulador de Meta Diaria":
         render_daily_goal_simulator(ops_df)
+    elif page == "Ventaja Temporal":
+        render_time_edge(ops_df)
+    elif page == "Inteligencia por Sesión":
+        render_session_intelligence(ops_df)
+    elif page == "Timing de Crazy Mode":
+        render_crazy_mode_timing(ops_df)
+    elif page == "Laboratorio de Parámetros":
+        render_parameter_lab(ops_df)
+    elif page == "Motor de Salidas":
+        render_exit_engine(ops_df, legs_df)
     elif page == "Explorador de Operaciones":
         render_operation_explorer(ops_df, legs_df)
 
