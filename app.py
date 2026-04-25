@@ -668,6 +668,74 @@ def aplicar_cap_reversal(ops_df: pd.DataFrame, legs_df: pd.DataFrame, max_revers
     return pd.concat([base, resultados_df], axis=1)
 
 
+
+def build_consecutive_loss_streaks(df: pd.DataFrame, pnl_col: str, time_col: str, id_col: str, unit_label: str) -> pd.DataFrame:
+    """
+    Builds consecutive-loss streaks in chronological order.
+    This is the dashboard MAX dropdown Rene asked for: max continuous losing sequences.
+    """
+    if df.empty or pnl_col not in df.columns or time_col not in df.columns:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work = work[pd.notna(work[pnl_col])].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
+    work = work.sort_values(time_col)
+
+    streaks = []
+    active_rows = []
+    streak_no = 0
+
+    def close_streak(rows):
+        nonlocal streak_no
+        if not rows:
+            return
+
+        streak_no += 1
+        block = pd.DataFrame(rows)
+        ids = block[id_col].astype(str).dropna().tolist() if id_col in block.columns else []
+        start_time = block[time_col].min()
+        end_time = block[time_col].max()
+        total_loss = float(block[pnl_col].sum())
+        worst_item = float(block[pnl_col].min())
+        month = str(start_time.to_period("M")) if pd.notna(start_time) else "-"
+        trade_day = start_time.date() if pd.notna(start_time) else None
+
+        streaks.append(
+            {
+                "streak_no": streak_no,
+                "unit": unit_label,
+                "month": month,
+                "trade_day_start": trade_day,
+                "start_time": start_time,
+                "end_time": end_time,
+                "losses_in_a_row": len(block),
+                "total_streak_loss": total_loss,
+                "worst_single_loss": worst_item,
+                "ids": ", ".join(ids[:8]) + (" ..." if len(ids) > 8 else ""),
+            }
+        )
+
+    for _, row in work.iterrows():
+        pnl = row[pnl_col]
+        if pd.notna(pnl) and float(pnl) < 0:
+            active_rows.append(row.to_dict())
+        else:
+            close_streak(active_rows)
+            active_rows = []
+
+    close_streak(active_rows)
+
+    if not streaks:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(streaks)
+    return out.sort_values(["losses_in_a_row", "total_streak_loss"], ascending=[False, True])
+
+
 # ============================================================
 # FILTERS
 # ============================================================
@@ -759,6 +827,63 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
     with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
     with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
+
+    st.markdown("---")
+    st.subheader("Rachas de pérdida continua")
+    section_note(
+        "Este es el dropdown de MAX que necesitabas: sirve para ver las peores rachas de pérdidas consecutivas. "
+        "Puedes analizarlo por operaciones completas o por piernas reales. Para riesgo diario, las piernas son la lectura más honesta."
+    )
+
+    c1, c2 = st.columns(2)
+    loss_streak_mode = c1.selectbox(
+        "Analizar pérdida continua por",
+        options=["Piernas reales", "Operaciones completas"],
+        index=0,
+        key="dashboard_loss_streak_mode",
+    )
+    max_loss_streak_rows = c2.selectbox(
+        "Max dropdown · rachas a mostrar",
+        options=[5, 10, 15, 25, 50, 100],
+        index=1,
+        key="dashboard_max_loss_streak_rows",
+        help="Controla cuántas rachas de pérdida continua quieres ver en la tabla.",
+    )
+
+    if loss_streak_mode == "Piernas reales":
+        streak_df = build_consecutive_loss_streaks(
+            legs_df,
+            pnl_col="realized_pnl_currency",
+            time_col="exit_time",
+            id_col="operation_id",
+            unit_label="Pierna",
+        )
+    else:
+        streak_df = build_consecutive_loss_streaks(
+            ops_df,
+            pnl_col="sequence_net_pnl_currency",
+            time_col="sequence_started_at",
+            id_col="operation_id",
+            unit_label="Operación",
+        )
+
+    if streak_df.empty:
+        st.info("No se encontraron rachas de pérdidas con los filtros actuales.")
+    else:
+        c = st.columns(4)
+        with c[0]: card("Máx pérdidas seguidas", f"{int(streak_df['losses_in_a_row'].max())}")
+        with c[1]: card("Peor racha", fmt_money(streak_df["total_streak_loss"].min()))
+        with c[2]: card("Rachas encontradas", f"{len(streak_df)}")
+        with c[3]: card("Peor pérdida individual", fmt_money(streak_df["worst_single_loss"].min()))
+
+        show_cols = [
+            "month", "trade_day_start", "start_time", "end_time", "unit",
+            "losses_in_a_row", "total_streak_loss", "worst_single_loss", "ids",
+        ]
+        st.dataframe(
+            streak_df[show_cols].head(int(max_loss_streak_rows)),
+            use_container_width=True,
+        )
 
     st.markdown("---")
     st.subheader("Simulación rápida por máximo reversal permitido")
