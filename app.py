@@ -1,14 +1,14 @@
 import json
-from typing import Tuple, Dict, List
+from typing import Dict, List, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 
 
 # ============================================================
-# PAGE CONFIG / STYLE
+# CONFIG / STYLE
 # ============================================================
 
 st.set_page_config(page_title="Laboratorio WLF", layout="wide")
@@ -20,27 +20,27 @@ div[data-testid="stHorizontalBlock"] { gap: 1rem; }
 .lab-card {
     border: 1px solid rgba(128,128,128,0.25);
     border-radius: 16px;
-    padding: 16px 18px;
-    min-height: 105px;
-    background: rgba(255,255,255,0.02);
+    padding: 15px 17px;
+    min-height: 100px;
+    background: rgba(255,255,255,0.025);
 }
 .lab-card-title {
     font-size: 0.90rem;
-    opacity: 0.80;
+    opacity: 0.78;
     margin-bottom: 8px;
 }
 .lab-card-value {
-    font-size: 1.95rem;
+    font-size: 1.9rem;
     font-weight: 700;
     line-height: 1.1;
 }
-.small-note {
-    opacity: 0.75;
-    font-size: 0.90rem;
+.small-note { opacity: 0.75; font-size: 0.90rem; }
+.section-note {
+    border-left: 4px solid rgba(128,128,128,0.45);
+    padding: 8px 12px;
+    margin: 8px 0 18px 0;
+    opacity: 0.90;
 }
-.good { color: #2ecc71; font-weight: 700; }
-.bad { color: #ff7675; font-weight: 700; }
-.warn { color: #f1c40f; font-weight: 700; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -48,7 +48,7 @@ div[data-testid="stHorizontalBlock"] { gap: 1rem; }
 
 
 # ============================================================
-# HELPERS
+# SMALL HELPERS
 # ============================================================
 
 
@@ -64,40 +64,61 @@ def card(title: str, value: str):
     )
 
 
-def mostrar_bloque_ayuda(titulo: str, descripcion: str, preguntas: List[str]):
-    with st.expander(f"¿Para qué sirve esta página? · {titulo}", expanded=False):
-        st.markdown(descripcion)
-        st.markdown("**Qué deberías mirar aquí:**")
-        for q in preguntas:
+def section_note(text: str):
+    st.markdown(f"<div class='section-note'>{text}</div>", unsafe_allow_html=True)
+
+
+def show_help(title: str, description: str, questions: List[str]):
+    with st.expander(f"¿Para qué sirve esta página? · {title}", expanded=False):
+        st.markdown(description)
+        st.markdown("**Decisión que deberías poder tomar:**")
+        for q in questions:
             st.markdown(f"- {q}")
 
 
-def mostrar_conclusion(titulo: str, lineas: List[str]):
-    st.markdown(f"### Lectura rápida · {titulo}")
-    for linea in lineas:
-        st.markdown(f"- {linea}")
-
-
-def safe_div(a: float, b: float) -> float:
-    if b is None or pd.isna(b) or b == 0:
-        return np.nan
-    return a / b
+def show_conclusion(title: str, lines: List[str]):
+    st.markdown(f"### Lectura rápida · {title}")
+    if not lines:
+        st.markdown("- Todavía no hay suficiente información para una conclusión clara.")
+        return
+    for line in lines:
+        st.markdown(f"- {line}")
 
 
 def fmt_money(x) -> str:
-    if pd.isna(x):
+    if x is None or pd.isna(x):
         return "-"
     return f"{float(x):,.2f}"
 
 
 def fmt_pct(x) -> str:
-    if pd.isna(x):
+    if x is None or pd.isna(x):
         return "-"
     return f"{float(x):.1f}%"
 
 
+def safe_div(a, b) -> float:
+    if b is None or pd.isna(b) or float(b) == 0:
+        return np.nan
+    return float(a) / float(b)
+
+
+def _to_datetime(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+def _to_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 # ============================================================
-# LOAD / TRANSFORM DATA
+# LOAD / BUILD DATA
 # ============================================================
 
 
@@ -105,14 +126,13 @@ def load_uploaded_jsonl_files(uploaded_files) -> List[dict]:
     records: List[dict] = []
 
     if not uploaded_files:
-        st.sidebar.info("Todavía no has cargado archivos JSONL.")
+        st.sidebar.info("Carga uno o más archivos JSONL para empezar.")
         return records
 
     for uploaded_file in uploaded_files:
         try:
             content = uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
             lines = content.splitlines()
-
             valid_count = 0
             invalid_count = 0
 
@@ -125,23 +145,22 @@ def load_uploaded_jsonl_files(uploaded_files) -> List[dict]:
                     obj["source_file"] = uploaded_file.name
                     records.append(obj)
                     valid_count += 1
-                except json.JSONDecodeError as e:
+                except json.JSONDecodeError as exc:
                     invalid_count += 1
                     if invalid_count <= 3:
-                        st.sidebar.warning(f"JSON inválido en {uploaded_file.name}, línea {i}: {str(e)}")
+                        st.sidebar.warning(f"JSON inválido en {uploaded_file.name}, línea {i}: {exc}")
 
             with st.sidebar.expander(f"Archivo · {uploaded_file.name}", expanded=False):
                 st.write(f"Líneas crudas: {len(lines)}")
                 st.write(f"Registros válidos: {valid_count}")
                 st.write(f"Líneas inválidas: {invalid_count}")
-
-        except Exception as e:
-            st.sidebar.error(f"Error al leer {uploaded_file.name}: {e}")
+        except Exception as exc:
+            st.sidebar.error(f"Error al leer {uploaded_file.name}: {exc}")
 
     return records
 
 
-def _clasificar_sesion(ts: pd.Timestamp) -> str:
+def classify_session(ts: pd.Timestamp) -> str:
     if pd.isna(ts):
         return "Sin sesión"
 
@@ -157,22 +176,7 @@ def _clasificar_sesion(ts: pd.Timestamp) -> str:
         return "NY Midday"
     if (13 * 60 + 30) <= total_min <= (17 * 60):
         return "NY Late"
-
     return "Fuera de Sesión"
-
-
-def _to_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
-
-
-def _to_datetime(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-    return df
 
 
 def build_dataframes(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -183,34 +187,35 @@ def build_dataframes(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     legs_rows = []
 
     for rec in records:
-        op_row = {
-            "source_file": rec.get("source_file"),
-            "operation_id": rec.get("operation_id"),
-            "bot_name": rec.get("bot_name"),
-            "bot_version": rec.get("bot_version"),
-            "instrument": rec.get("instrument"),
-            "date": rec.get("date"),
-            "sequence_started_at": rec.get("sequence_started_at"),
-            "sequence_ended_at": rec.get("sequence_ended_at"),
-            "sequence_end_reason": rec.get("sequence_end_reason"),
-            "base_price": rec.get("base_price"),
-            "range_high": rec.get("range_high"),
-            "range_low": rec.get("range_low"),
-            "base_contracts": rec.get("base_contracts"),
-            "reversal_count": rec.get("reversal_count"),
-            "reversal_sizing_mode": rec.get("reversal_sizing_mode"),
-            "max_reversals_allowed": rec.get("max_reversals_allowed"),
-            "fixed_stop_ticks": rec.get("fixed_stop_ticks"),
-            "fixed_target_ticks": rec.get("fixed_target_ticks"),
-            "distance_points": rec.get("distance_points"),
-            "sequence_net_pnl_currency": rec.get("sequence_net_pnl_currency"),
-            "sequence_loss_currency": rec.get("sequence_loss_currency"),
-            "sequence_execution_commission_currency": rec.get("sequence_execution_commission_currency"),
-            "base_target_profit_currency": rec.get("base_target_profit_currency"),
-            "operation_max_drawdown_currency": rec.get("operation_max_drawdown_currency"),
-            "operation_max_runup_currency": rec.get("operation_max_runup_currency"),
-        }
-        ops_rows.append(op_row)
+        ops_rows.append(
+            {
+                "source_file": rec.get("source_file"),
+                "operation_id": rec.get("operation_id"),
+                "bot_name": rec.get("bot_name"),
+                "bot_version": rec.get("bot_version"),
+                "instrument": rec.get("instrument"),
+                "date": rec.get("date"),
+                "sequence_started_at": rec.get("sequence_started_at"),
+                "sequence_ended_at": rec.get("sequence_ended_at"),
+                "sequence_end_reason": rec.get("sequence_end_reason"),
+                "base_price": rec.get("base_price"),
+                "range_high": rec.get("range_high"),
+                "range_low": rec.get("range_low"),
+                "base_contracts": rec.get("base_contracts"),
+                "reversal_count": rec.get("reversal_count"),
+                "reversal_sizing_mode": rec.get("reversal_sizing_mode"),
+                "max_reversals_allowed": rec.get("max_reversals_allowed"),
+                "fixed_stop_ticks": rec.get("fixed_stop_ticks"),
+                "fixed_target_ticks": rec.get("fixed_target_ticks"),
+                "distance_points": rec.get("distance_points"),
+                "sequence_net_pnl_currency": rec.get("sequence_net_pnl_currency"),
+                "sequence_loss_currency": rec.get("sequence_loss_currency"),
+                "sequence_execution_commission_currency": rec.get("sequence_execution_commission_currency"),
+                "base_target_profit_currency": rec.get("base_target_profit_currency"),
+                "operation_max_drawdown_currency": rec.get("operation_max_drawdown_currency"),
+                "operation_max_runup_currency": rec.get("operation_max_runup_currency"),
+            }
+        )
 
         for leg in rec.get("legs", []):
             legs_rows.append(
@@ -253,40 +258,19 @@ def build_dataframes(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ops_df = _to_numeric(
         ops_df,
         [
-            "base_price",
-            "range_high",
-            "range_low",
-            "base_contracts",
-            "reversal_count",
-            "max_reversals_allowed",
-            "fixed_stop_ticks",
-            "fixed_target_ticks",
-            "distance_points",
-            "sequence_net_pnl_currency",
-            "sequence_loss_currency",
-            "sequence_execution_commission_currency",
-            "base_target_profit_currency",
-            "operation_max_drawdown_currency",
-            "operation_max_runup_currency",
+            "base_price", "range_high", "range_low", "base_contracts", "reversal_count",
+            "max_reversals_allowed", "fixed_stop_ticks", "fixed_target_ticks", "distance_points",
+            "sequence_net_pnl_currency", "sequence_loss_currency", "sequence_execution_commission_currency",
+            "base_target_profit_currency", "operation_max_drawdown_currency", "operation_max_runup_currency",
         ],
     )
-
     legs_df = _to_numeric(
         legs_df,
         [
-            "leg_index",
-            "reversal_number",
-            "entry_price_avg",
-            "entry_qty",
-            "initial_stop_price",
-            "initial_target_price",
-            "exit_price_avg",
-            "realized_pnl_currency",
-            "sequence_loss_before_entry",
-            "smart_recovery_qty_computed",
-            "cumulative_sequence_pnl_after_leg",
-            "operation_drawdown_after_leg",
-            "operation_runup_after_leg",
+            "leg_index", "reversal_number", "entry_price_avg", "entry_qty", "initial_stop_price",
+            "initial_target_price", "exit_price_avg", "realized_pnl_currency", "sequence_loss_before_entry",
+            "smart_recovery_qty_computed", "cumulative_sequence_pnl_after_leg",
+            "operation_drawdown_after_leg", "operation_runup_after_leg",
         ],
     )
 
@@ -297,70 +281,38 @@ def build_dataframes(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ops_df["trade_day"] = ops_df["sequence_started_at"].dt.date
     ops_df["month"] = ops_df["sequence_started_at"].dt.to_period("M").astype(str)
     ops_df["hora_inicio"] = ops_df["sequence_started_at"].dt.hour
-    ops_df["minuto_inicio"] = ops_df["sequence_started_at"].dt.minute
     ops_df["dia_semana"] = ops_df["sequence_started_at"].dt.day_name()
-    ops_df["sesion"] = ops_df["sequence_started_at"].apply(_clasificar_sesion)
-    ops_df["es_ganadora"] = ops_df["sequence_net_pnl_currency"] > 0
-    ops_df["numero_operacion_dia"] = ops_df.groupby("trade_day").cumcount() + 1
+    ops_df["sesion"] = ops_df["sequence_started_at"].apply(classify_session)
+    ops_df["es_ganadora"] = ops_df["sequence_net_pnl_currency"].fillna(0) > 0
 
-    # Full config key. This is important when several months/settings are loaded together.
     ops_df["config_key"] = (
         "BC=" + ops_df["base_contracts"].fillna(-1).astype(int).astype(str)
         + " | SL=" + ops_df["fixed_stop_ticks"].fillna(-1).astype(int).astype(str)
         + " | TP=" + ops_df["fixed_target_ticks"].fillna(-1).astype(int).astype(str)
         + " | REV=" + ops_df["max_reversals_allowed"].fillna(-1).astype(int).astype(str)
-        + " | DIST=" + ops_df["distance_points"].round(2).astype(str)
+        + " | DIST=" + ops_df["distance_points"].fillna(-1).round(2).astype(str)
     )
 
     if not legs_df.empty:
         legs_df["month"] = legs_df["sequence_started_at"].dt.to_period("M").astype(str)
+        max_qty = legs_df.groupby("operation_id", as_index=False).agg(max_contracts_used=("entry_qty", "max"))
+        ops_df = ops_df.merge(max_qty, on="operation_id", how="left")
+
         legs_df = legs_df.merge(
-            ops_df[["operation_id", "trade_day", "config_key", "instrument", "sesion", "hora_inicio", "dia_semana"]],
+            ops_df[["operation_id", "trade_day", "month", "config_key", "instrument", "sesion", "hora_inicio", "dia_semana"]],
             on="operation_id",
             how="left",
             suffixes=("", "_op"),
         )
+    else:
+        ops_df["max_contracts_used"] = np.nan
 
     return ops_df, legs_df
 
 
 # ============================================================
-# METRICS / SIMULATIONS
+# METRICS
 # ============================================================
-
-
-def compute_overview_metrics(ops_df: pd.DataFrame) -> Dict[str, float]:
-    if ops_df.empty:
-        return {}
-
-    pnl = ops_df["sequence_net_pnl_currency"].fillna(0)
-    winners = pnl[pnl > 0]
-    losers = pnl[pnl < 0]
-
-    gross_profit = winners.sum()
-    gross_loss = abs(losers.sum())
-    profit_factor = safe_div(gross_profit, gross_loss)
-
-    daily = ops_df.groupby("trade_day")["sequence_net_pnl_currency"].sum()
-
-    return {
-        "total_operations": len(ops_df),
-        "days": daily.shape[0],
-        "total_net_pnl": pnl.sum(),
-        "avg_pnl": pnl.mean(),
-        "median_pnl": pnl.median(),
-        "win_rate": (pnl > 0).mean() * 100,
-        "profit_factor": profit_factor,
-        "avg_winner": winners.mean() if not winners.empty else np.nan,
-        "avg_loser": losers.mean() if not losers.empty else np.nan,
-        "worst_operation": pnl.min(),
-        "best_operation": pnl.max(),
-        "positive_days_rate": (daily > 0).mean() * 100 if len(daily) else np.nan,
-        "best_day": daily.max() if len(daily) else np.nan,
-        "worst_day": daily.min() if len(daily) else np.nan,
-        "max_operation_drawdown": ops_df["operation_max_drawdown_currency"].max(),
-        "avg_reversals": ops_df["reversal_count"].mean(),
-    }
 
 
 def aggregate_core(df: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
@@ -378,19 +330,20 @@ def aggregate_core(df: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
         drawdown_max=("operation_max_drawdown_currency", "max"),
         drawdown_promedio=("operation_max_drawdown_currency", "mean"),
         reversiones_promedio=("reversal_count", "mean"),
+        contratos_max=("max_contracts_used", "max"),
     ).reset_index()
-
     grouped["tasa_acierto"] = grouped["tasa_acierto"] * 100
-    return grouped
+    return add_profit_factor(df, grouped, group_cols)
 
 
-def add_profit_factor_by_group(df: pd.DataFrame, grouped: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
-    if df.empty or grouped.empty:
+def add_profit_factor(source_df: pd.DataFrame, grouped: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
+    if source_df.empty or grouped.empty:
         return grouped
 
-    tmp = df.copy()
+    tmp = source_df.copy()
     tmp["gross_profit"] = tmp["sequence_net_pnl_currency"].where(tmp["sequence_net_pnl_currency"] > 0, 0)
     tmp["gross_loss"] = -tmp["sequence_net_pnl_currency"].where(tmp["sequence_net_pnl_currency"] < 0, 0)
+
     pf = tmp.groupby(group_cols, dropna=False).agg(
         gross_profit=("gross_profit", "sum"),
         gross_loss=("gross_loss", "sum"),
@@ -399,254 +352,225 @@ def add_profit_factor_by_group(df: pd.DataFrame, grouped: pd.DataFrame, group_co
     return grouped.merge(pf[group_cols + ["profit_factor"]], on=group_cols, how="left")
 
 
+def overview_metrics(ops_df: pd.DataFrame) -> Dict[str, float]:
+    if ops_df.empty:
+        return {}
+
+    pnl = ops_df["sequence_net_pnl_currency"].fillna(0)
+    winners = pnl[pnl > 0]
+    losers = pnl[pnl < 0]
+    daily = ops_df.groupby("trade_day")["sequence_net_pnl_currency"].sum()
+
+    return {
+        "ops": len(ops_df),
+        "days": daily.shape[0],
+        "pnl": pnl.sum(),
+        "win_rate": (pnl > 0).mean() * 100,
+        "profit_factor": safe_div(winners.sum(), abs(losers.sum())),
+        "avg_pnl": pnl.mean(),
+        "best_op": pnl.max(),
+        "worst_op": pnl.min(),
+        "best_day": daily.max() if len(daily) else np.nan,
+        "worst_day": daily.min() if len(daily) else np.nan,
+        "positive_days_rate": (daily > 0).mean() * 100 if len(daily) else np.nan,
+        "max_dd": ops_df["operation_max_drawdown_currency"].max(),
+        "avg_rev": ops_df["reversal_count"].mean(),
+        "max_contracts": ops_df["max_contracts_used"].max(),
+    }
+
+
+# ============================================================
+# SIMULATIONS
+# ============================================================
+
+
 def simulate_daily_stop(ops_df: pd.DataFrame, daily_target: float, daily_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    rows = []
     if ops_df.empty:
         return pd.DataFrame(), {}
 
-    sim_rows = []
     for trade_day, day_df in ops_df.sort_values("sequence_started_at").groupby("trade_day"):
         running = 0.0
-        outcome = "ninguno"
-        stop_after_operation = None
-        month = day_df["month"].iloc[0]
+        reason = "End of day"
+        stopped_after = None
+        ops_used = 0
 
         for _, row in day_df.iterrows():
             running += float(row["sequence_net_pnl_currency"] or 0)
-            stop_after_operation = row["operation_id"]
+            stopped_after = row["operation_id"]
+            ops_used += 1
 
             if running >= daily_target:
-                outcome = "meta_primero"
                 running = daily_target
+                reason = "Target reached"
                 break
             if running <= -daily_loss:
-                outcome = "perdida_primero"
                 running = -daily_loss
+                reason = "Loss reached"
                 break
 
-        sim_rows.append(
+        rows.append(
             {
-                "month": month,
+                "month": day_df["month"].iloc[0],
                 "trade_day": trade_day,
-                "resultado_diario_simulado": running,
-                "resultado": outcome,
-                "stop_after_operation": stop_after_operation,
+                "simulated_day_pnl": running,
+                "result": "Win" if running > 0 else "Loss" if running < 0 else "Flat",
+                "stop_reason": reason,
+                "operations_used": ops_used,
+                "stopped_after_operation": stopped_after,
+                "real_day_pnl": day_df["sequence_net_pnl_currency"].sum(),
+                "real_operations": len(day_df),
             }
         )
 
-    sim_df = pd.DataFrame(sim_rows)
+    sim = pd.DataFrame(rows)
     metrics = {
-        "days": len(sim_df),
-        "target_first_rate": (sim_df["resultado"] == "meta_primero").mean() * 100,
-        "loss_first_rate": (sim_df["resultado"] == "perdida_primero").mean() * 100,
-        "neither_rate": (sim_df["resultado"] == "ninguno").mean() * 100,
-        "avg_daily_result": sim_df["resultado_diario_simulado"].mean(),
-        "median_daily_result": sim_df["resultado_diario_simulado"].median(),
-        "total_simulated_pnl": sim_df["resultado_diario_simulado"].sum(),
-        "best_day": sim_df["resultado_diario_simulado"].max(),
-        "worst_day": sim_df["resultado_diario_simulado"].min(),
+        "days": len(sim),
+        "total_pnl": sim["simulated_day_pnl"].sum(),
+        "avg_day": sim["simulated_day_pnl"].mean(),
+        "target_days_pct": (sim["stop_reason"] == "Target reached").mean() * 100,
+        "loss_days_pct": (sim["stop_reason"] == "Loss reached").mean() * 100,
+        "open_days_pct": (sim["stop_reason"] == "End of day").mean() * 100,
+        "winning_days_pct": (sim["simulated_day_pnl"] > 0).mean() * 100,
+        "best_day": sim["simulated_day_pnl"].max(),
+        "worst_day": sim["simulated_day_pnl"].min(),
     }
-    return sim_df, metrics
+    return sim, metrics
 
 
 def simulate_daily_sets(ops_df: pd.DataFrame, set_target: float, set_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """
-    User logic:
-    - Operations are consumed chronologically.
-    - A set starts from the next available operation.
-    - Keep adding operation PnL until target or loss is reached.
-    - When a set closes, the next operation starts a new set.
-    """
+    rows = []
     if ops_df.empty:
         return pd.DataFrame(), {}
-
-    set_rows = []
 
     for trade_day, day_df in ops_df.sort_values("sequence_started_at").groupby("trade_day"):
         set_number = 1
         running = 0.0
-        ops_in_set = 0
-        set_start_time = None
+        ops_used = 0
         set_start_op = None
-        month = day_df["month"].iloc[0]
+        set_start_time = None
 
         for _, row in day_df.iterrows():
-            if ops_in_set == 0:
-                set_start_time = row["sequence_started_at"]
-                set_start_op = row["operation_id"]
+            if ops_used == 0:
                 running = 0.0
+                set_start_op = row["operation_id"]
+                set_start_time = row["sequence_started_at"]
 
             running += float(row["sequence_net_pnl_currency"] or 0)
-            ops_in_set += 1
+            ops_used += 1
 
             outcome = None
-            final_result = None
-
+            result = None
             if running >= set_target:
-                outcome = "set_win"
-                final_result = set_target
+                outcome = "Set target reached"
+                result = set_target
             elif running <= -set_loss:
-                outcome = "set_loss"
-                final_result = -set_loss
+                outcome = "Set loss reached"
+                result = -set_loss
 
             if outcome:
-                set_rows.append(
+                rows.append(
                     {
-                        "month": month,
+                        "month": day_df["month"].iloc[0],
                         "trade_day": trade_day,
                         "set_number": set_number,
+                        "set_result": result,
+                        "set_outcome": outcome,
+                        "operations_used": ops_used,
+                        "start_operation": set_start_op,
+                        "end_operation": row["operation_id"],
                         "set_start_time": set_start_time,
                         "set_end_time": row["sequence_started_at"],
-                        "start_operation_id": set_start_op,
-                        "end_operation_id": row["operation_id"],
-                        "operations_used": ops_in_set,
-                        "raw_running_pnl_at_trigger": running,
-                        "set_result": final_result,
-                        "outcome": outcome,
                     }
                 )
                 set_number += 1
                 running = 0.0
-                ops_in_set = 0
-                set_start_time = None
+                ops_used = 0
                 set_start_op = None
+                set_start_time = None
 
-        if ops_in_set > 0:
-            set_rows.append(
+        if ops_used > 0:
+            rows.append(
                 {
-                    "month": month,
+                    "month": day_df["month"].iloc[0],
                     "trade_day": trade_day,
                     "set_number": set_number,
+                    "set_result": running,
+                    "set_outcome": "End of day",
+                    "operations_used": ops_used,
+                    "start_operation": set_start_op,
+                    "end_operation": day_df.iloc[-1]["operation_id"],
                     "set_start_time": set_start_time,
                     "set_end_time": day_df.iloc[-1]["sequence_started_at"],
-                    "start_operation_id": set_start_op,
-                    "end_operation_id": day_df.iloc[-1]["operation_id"],
-                    "operations_used": ops_in_set,
-                    "raw_running_pnl_at_trigger": running,
-                    "set_result": running,
-                    "outcome": "open_end_day",
                 }
             )
 
-    sets_df = pd.DataFrame(set_rows)
-    if sets_df.empty:
-        return sets_df, {}
-
+    sets = pd.DataFrame(rows)
     metrics = {
-        "sets": len(sets_df),
-        "set_win_rate": (sets_df["outcome"] == "set_win").mean() * 100,
-        "set_loss_rate": (sets_df["outcome"] == "set_loss").mean() * 100,
-        "open_end_rate": (sets_df["outcome"] == "open_end_day").mean() * 100,
-        "total_set_pnl": sets_df["set_result"].sum(),
-        "avg_set_pnl": sets_df["set_result"].mean(),
-        "median_set_pnl": sets_df["set_result"].median(),
-        "avg_operations_per_set": sets_df["operations_used"].mean(),
-        "best_set": sets_df["set_result"].max(),
-        "worst_set": sets_df["set_result"].min(),
+        "sets": len(sets),
+        "total_pnl": sets["set_result"].sum() if not sets.empty else np.nan,
+        "avg_set": sets["set_result"].mean() if not sets.empty else np.nan,
+        "target_sets_pct": (sets["set_outcome"] == "Set target reached").mean() * 100 if not sets.empty else np.nan,
+        "loss_sets_pct": (sets["set_outcome"] == "Set loss reached").mean() * 100 if not sets.empty else np.nan,
+        "open_sets_pct": (sets["set_outcome"] == "End of day").mean() * 100 if not sets.empty else np.nan,
+        "avg_ops_per_set": sets["operations_used"].mean() if not sets.empty else np.nan,
+        "best_set": sets["set_result"].max() if not sets.empty else np.nan,
+        "worst_set": sets["set_result"].min() if not sets.empty else np.nan,
     }
-    return sets_df, metrics
-
-
-def calcular_resultado_simulado_por_cap_reversal(op_row: pd.Series, legs_df: pd.DataFrame, max_reversal_permitido: int) -> Dict[str, object]:
-    operation_id = op_row["operation_id"]
-    reversal_count_real = int(op_row["reversal_count"]) if pd.notna(op_row["reversal_count"]) else 0
-
-    if reversal_count_real <= max_reversal_permitido:
-        return {
-            "reversal_count_simulado": reversal_count_real,
-            "sequence_end_reason_simulado": op_row.get("sequence_end_reason"),
-            "sequence_net_pnl_simulado": float(op_row.get("sequence_net_pnl_currency") or 0),
-        }
-
-    legs_op = legs_df.loc[legs_df["operation_id"] == operation_id].copy()
-    if legs_op.empty:
-        return {
-            "reversal_count_simulado": max_reversal_permitido,
-            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}",
-            "sequence_net_pnl_simulado": float(op_row.get("sequence_net_pnl_currency") or 0),
-        }
-
-    legs_op = legs_op.sort_values("leg_index")
-    leg_target = legs_op.loc[legs_op["reversal_number"] == max_reversal_permitido].copy()
-
-    if leg_target.empty:
-        return {
-            "reversal_count_simulado": max_reversal_permitido,
-            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}",
-            "sequence_net_pnl_simulado": float(op_row.get("sequence_net_pnl_currency") or 0),
-        }
-
-    leg_target = leg_target.sort_values("leg_index").iloc[-1]
-    pnl_simulado = leg_target.get("cumulative_sequence_pnl_after_leg")
-    if pd.isna(pnl_simulado):
-        pnl_simulado = op_row.get("sequence_net_pnl_currency") or 0
-
-    exit_reason = leg_target.get("exit_reason")
-    if pd.isna(exit_reason) or str(exit_reason).strip() == "":
-        exit_reason = f"CAP_{max_reversal_permitido}"
-
-    return {
-        "reversal_count_simulado": max_reversal_permitido,
-        "sequence_end_reason_simulado": str(exit_reason),
-        "sequence_net_pnl_simulado": float(pnl_simulado),
-    }
-
-
-def apply_reversal_cap(ops_df: pd.DataFrame, legs_df: pd.DataFrame, max_reversal_permitido: int) -> pd.DataFrame:
-    if ops_df.empty:
-        return ops_df.copy()
-    results = ops_df.apply(
-        lambda row: calcular_resultado_simulado_por_cap_reversal(row, legs_df, max_reversal_permitido),
-        axis=1,
-    )
-    results_df = pd.DataFrame(results.tolist(), index=ops_df.index)
-    return pd.concat([ops_df.copy(), results_df], axis=1)
+    return sets, metrics
 
 
 # ============================================================
-# GLOBAL FILTERS
+# FILTERS
 # ============================================================
 
 
 def apply_global_filters(ops_df: pd.DataFrame, legs_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Filtros Globales")
+    st.sidebar.subheader("Filtros globales")
 
     filtered_ops = ops_df.copy()
+    filtered_legs = legs_df.copy()
 
     months = sorted(filtered_ops["month"].dropna().unique().tolist())
     selected_months = st.sidebar.multiselect("Meses", months, default=months)
     if selected_months:
         filtered_ops = filtered_ops[filtered_ops["month"].isin(selected_months)]
+        if not filtered_legs.empty and "month" in filtered_legs.columns:
+            filtered_legs = filtered_legs[filtered_legs["month"].isin(selected_months)]
 
     instruments = sorted(filtered_ops["instrument"].dropna().unique().tolist())
     selected_instruments = st.sidebar.multiselect("Instrumentos", instruments, default=instruments)
     if selected_instruments:
         filtered_ops = filtered_ops[filtered_ops["instrument"].isin(selected_instruments)]
+        if not filtered_legs.empty and "instrument" in filtered_legs.columns:
+            filtered_legs = filtered_legs[filtered_legs["instrument"].isin(selected_instruments)]
 
     configs = sorted(filtered_ops["config_key"].dropna().unique().tolist())
-    selected_configs = st.sidebar.multiselect("Configs", configs, default=configs)
+    selected_configs = st.sidebar.multiselect("Configuraciones", configs, default=configs)
     if selected_configs:
         filtered_ops = filtered_ops[filtered_ops["config_key"].isin(selected_configs)]
+        if not filtered_legs.empty and "config_key" in filtered_legs.columns:
+            filtered_legs = filtered_legs[filtered_legs["config_key"].isin(selected_configs)]
 
     if not filtered_ops.empty:
-        min_dt = filtered_ops["sequence_started_at"].min().date()
-        max_dt = filtered_ops["sequence_started_at"].max().date()
-        c1, c2 = st.sidebar.columns(2)
-        start_date = c1.date_input("Desde", value=min_dt)
-        end_date = c2.date_input("Hasta", value=max_dt)
-        filtered_ops = filtered_ops[
-            (filtered_ops["sequence_started_at"].dt.date >= start_date)
-            & (filtered_ops["sequence_started_at"].dt.date <= end_date)
-        ]
+        min_date = filtered_ops["sequence_started_at"].min().date()
+        max_date = filtered_ops["sequence_started_at"].max().date()
+        date_range = st.sidebar.date_input("Rango de fechas", value=(min_date, max_date))
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+            filtered_ops = filtered_ops[
+                (filtered_ops["sequence_started_at"].dt.date >= start_date)
+                & (filtered_ops["sequence_started_at"].dt.date <= end_date)
+            ]
+            if not filtered_legs.empty and "sequence_started_at" in filtered_legs.columns:
+                filtered_legs = filtered_legs[
+                    (filtered_legs["sequence_started_at"].dt.date >= start_date)
+                    & (filtered_legs["sequence_started_at"].dt.date <= end_date)
+                ]
 
-    valid_op_ids = set(filtered_ops["operation_id"].dropna().astype(str).tolist())
-    filtered_legs = legs_df.copy()
-    if not filtered_legs.empty:
-        filtered_legs = filtered_legs[filtered_legs["operation_id"].astype(str).isin(valid_op_ids)]
-
-    st.sidebar.markdown("---")
-    st.sidebar.metric("Operaciones visibles", f"{len(filtered_ops)}")
-    st.sidebar.metric("Piernas visibles", f"{len(filtered_legs)}")
+    st.sidebar.metric("Operaciones filtradas", len(filtered_ops))
+    st.sidebar.metric("Piernas filtradas", len(filtered_legs))
 
     return filtered_ops, filtered_legs
 
@@ -658,14 +582,15 @@ def apply_global_filters(ops_df: pd.DataFrame, legs_df: pd.DataFrame) -> Tuple[p
 
 def render_dashboard_general(ops_df: pd.DataFrame):
     st.header("Dashboard General")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿el bot está sano, estable y consistente por mes y por día?")
+    show_help(
         "Dashboard General",
-        "Esta página resume la salud global del bot, pero también la separa por mes y por día para evitar conclusiones falsas cuando cargas varios meses.",
+        "Vista principal del bot. Mira primero esta página antes de tocar settings.",
         [
-            "¿El bot está positivo de forma global?",
-            "¿Todos los meses ayudan o un mes está escondiendo problemas?",
-            "¿Los días malos son demasiado grandes?",
-            "¿El resultado depende de una o dos operaciones gigantes?",
+            "¿El PnL total es positivo?",
+            "¿El resultado depende de un solo mes o un solo día?",
+            "¿La peor operación o peor día son demasiado grandes?",
+            "¿El profit factor justifica seguir probando esta configuración?",
         ],
     )
 
@@ -673,100 +598,75 @@ def render_dashboard_general(ops_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    metrics = compute_overview_metrics(ops_df)
+    m = overview_metrics(ops_df)
+    c = st.columns(4)
+    c[0].markdown(card("Operaciones", f"{m['ops']}"), unsafe_allow_html=True) if False else None
+    with c[0]: card("Operaciones", f"{m['ops']}")
+    with c[1]: card("Días", f"{m['days']}")
+    with c[2]: card("PnL Total", fmt_money(m["pnl"]))
+    with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
 
-    row1 = st.columns(4)
-    with row1[0]: card("Operaciones", f"{metrics['total_operations']}")
-    with row1[1]: card("Días", f"{metrics['days']}")
-    with row1[2]: card("PnL Neto", fmt_money(metrics["total_net_pnl"]))
-    with row1[3]: card("Profit Factor", "-" if pd.isna(metrics["profit_factor"]) else f"{metrics['profit_factor']:.2f}")
+    c = st.columns(4)
+    with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
+    with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
+    with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
+    with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
 
-    row2 = st.columns(4)
-    with row2[0]: card("Win Rate", fmt_pct(metrics["win_rate"]))
-    with row2[1]: card("Días Positivos", fmt_pct(metrics["positive_days_rate"]))
-    with row2[2]: card("Mejor Día", fmt_money(metrics["best_day"]))
-    with row2[3]: card("Peor Día", fmt_money(metrics["worst_day"]))
+    st.subheader("Resultado mensual")
+    monthly = aggregate_core(ops_df, ["month"]).sort_values("month")
+    st.dataframe(monthly, use_container_width=True)
 
-    row3 = st.columns(4)
-    with row3[0]: card("Mejor Op", fmt_money(metrics["best_operation"]))
-    with row3[1]: card("Peor Op", fmt_money(metrics["worst_operation"]))
-    with row3[2]: card("Max DD Op", fmt_money(metrics["max_operation_drawdown"]))
-    with row3[3]: card("Rev Promedio", f"{metrics['avg_reversals']:.2f}")
-
-    st.markdown("---")
-    st.subheader("Comparación mensual")
-    monthly = aggregate_core(ops_df, ["month"])
-    monthly = add_profit_factor_by_group(ops_df, monthly, ["month"])
-    st.dataframe(monthly.sort_values("month"), use_container_width=True)
-
-    if len(monthly) > 1:
+    if len(monthly) > 0:
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.bar(monthly["month"].astype(str), monthly["pnl_total"])
         ax.set_title("PnL por Mes")
         ax.set_xlabel("Mes")
         ax.set_ylabel("PnL")
-        ax.tick_params(axis="x", rotation=25)
         st.pyplot(fig)
 
-    st.subheader("Análisis diario")
+    st.subheader("Resultado diario")
     daily = ops_df.groupby(["month", "trade_day"], as_index=False).agg(
-        operaciones=("operation_id", "count"),
         pnl_diario=("sequence_net_pnl_currency", "sum"),
+        operaciones=("operation_id", "count"),
         peor_operacion=("sequence_net_pnl_currency", "min"),
         mejor_operacion=("sequence_net_pnl_currency", "max"),
         drawdown_max=("operation_max_drawdown_currency", "max"),
         reversiones_promedio=("reversal_count", "mean"),
     ).sort_values("trade_day")
-
     st.dataframe(daily, use_container_width=True)
 
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.plot(daily["trade_day"].astype(str), daily["pnl_diario"], marker="o")
     ax.set_title("PnL Diario")
-    ax.set_xlabel("Día")
     ax.set_ylabel("PnL")
     ax.tick_params(axis="x", rotation=45)
     st.pyplot(fig)
 
-    st.subheader("Mejores y peores días")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Peores días**")
-        st.dataframe(daily.sort_values("pnl_diario").head(10), use_container_width=True)
-    with c2:
-        st.markdown("**Mejores días**")
-        st.dataframe(daily.sort_values("pnl_diario", ascending=False).head(10), use_container_width=True)
-
-    lineas = []
-    if metrics["total_net_pnl"] > 0:
-        lineas.append("El bot está positivo en el rango filtrado.")
-    else:
-        lineas.append("El bot está negativo en el rango filtrado.")
-
-    if pd.notna(metrics["profit_factor"]):
-        if metrics["profit_factor"] >= 1.5:
-            lineas.append("El profit factor se ve saludable.")
-        elif metrics["profit_factor"] >= 1.0:
-            lineas.append("El profit factor está positivo, pero todavía necesita control de riesgo.")
+    lines = []
+    lines.append("El bot está positivo en el rango filtrado." if m["pnl"] > 0 else "El bot está negativo en el rango filtrado.")
+    if not pd.isna(m["profit_factor"]):
+        if m["profit_factor"] >= 1.40:
+            lines.append("El profit factor se ve saludable para seguir validando.")
+        elif m["profit_factor"] >= 1.0:
+            lines.append("El profit factor está apenas aceptable; conviene revisar riesgos y horarios.")
         else:
-            lineas.append("El profit factor está débil; conviene revisar filtros, reversals y horarios.")
-
-    if pd.notna(metrics["worst_day"]) and abs(metrics["worst_day"]) > abs(metrics["best_day"]) * 0.8:
-        lineas.append("El peor día es grande comparado con el mejor día; hay que revisar los días peligrosos.")
-
-    mostrar_conclusion("Dashboard General", lineas)
+            lines.append("El profit factor está débil; no confiaría todavía en esta configuración.")
+    if abs(m["worst_op"]) > max(abs(m["avg_pnl"]) * 10, 1):
+        lines.append("La peor operación parece grande comparada con el promedio; revisa Risk Killers.")
+    show_conclusion("Dashboard General", lines)
 
 
 def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     st.header("Tiempo y Sesiones")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿cuándo debería operar el bot y qué horarios/sesiones conviene bloquear?")
+    show_help(
         "Tiempo y Sesiones",
-        "Aquí mantenemos lo útil del análisis viejo: días de semana, horas y sesiones. Esta página responde en qué ventanas el bot tiene edge real.",
+        "Análisis por día de semana, hora y sesión. Aquí buscamos edge temporal.",
         [
-            "¿Qué día de la semana aporta más o menos PnL?",
-            "¿Qué hora destruye el resultado?",
-            "¿Qué sesión exige más reversals o drawdown?",
-            "¿Hay horarios que conviene bloquear?",
+            "¿Qué horas generan PnL positivo?",
+            "¿Qué sesiones son peligrosas?",
+            "¿Hay días de semana que dañan el resultado?",
+            "¿El mismo horario falla en varios meses?",
         ],
     )
 
@@ -774,83 +674,58 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
+    st.subheader("Día de semana")
     weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-
-    st.subheader("Por día de la semana")
     weekday = aggregate_core(ops_df, ["dia_semana"])
-    weekday["weekday_order"] = weekday["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
-    weekday = weekday.sort_values("weekday_order").drop(columns=["weekday_order"])
+    weekday["_order"] = weekday["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
+    weekday = weekday.sort_values("_order").drop(columns=["_order"])
     st.dataframe(weekday, use_container_width=True)
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(weekday["dia_semana"].astype(str), weekday["pnl_total"])
-    ax.set_title("PnL por Día de la Semana")
-    ax.set_xlabel("Día")
-    ax.set_ylabel("PnL")
-    ax.tick_params(axis="x", rotation=25)
-    st.pyplot(fig)
-
-    st.subheader("Por hora")
-    by_hour = aggregate_core(ops_df, ["hora_inicio"])
-    by_hour = by_hour.sort_values("hora_inicio")
+    st.subheader("Hora")
+    by_hour = aggregate_core(ops_df, ["hora_inicio"]).sort_values("hora_inicio")
     st.dataframe(by_hour, use_container_width=True)
+    if len(by_hour) > 1:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(by_hour["hora_inicio"].astype(str), by_hour["pnl_total"])
+        ax.set_title("PnL por Hora")
+        ax.set_xlabel("Hora")
+        ax.set_ylabel("PnL")
+        st.pyplot(fig)
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(by_hour["hora_inicio"].astype(str), by_hour["pnl_total"])
-    ax.set_title("PnL por Hora de Inicio")
-    ax.set_xlabel("Hora")
-    ax.set_ylabel("PnL")
-    st.pyplot(fig)
-
-    st.subheader("Por sesión")
-    session_df = aggregate_core(ops_df, ["sesion"])
-    st.dataframe(session_df.sort_values("pnl_total", ascending=False), use_container_width=True)
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(session_df["sesion"].astype(str), session_df["pnl_total"])
-    ax.set_title("PnL por Sesión")
-    ax.set_xlabel("Sesión")
-    ax.set_ylabel("PnL")
-    ax.tick_params(axis="x", rotation=25)
-    st.pyplot(fig)
+    st.subheader("Sesión")
+    by_session = aggregate_core(ops_df, ["sesion"]).sort_values("pnl_total", ascending=False)
+    st.dataframe(by_session, use_container_width=True)
 
     if ops_df["month"].nunique() > 1:
         st.subheader("Sesión por mes")
-        session_month = aggregate_core(ops_df, ["month", "sesion"])
-        st.dataframe(session_month.sort_values(["month", "pnl_total"], ascending=[True, False]), use_container_width=True)
+        session_month = aggregate_core(ops_df, ["month", "sesion"]).sort_values(["month", "pnl_total"], ascending=[True, False])
+        st.dataframe(session_month, use_container_width=True)
 
-        st.subheader("Hora por mes")
-        hour_month = aggregate_core(ops_df, ["month", "hora_inicio"])
-        st.dataframe(hour_month.sort_values(["month", "hora_inicio"]), use_container_width=True)
-
-    st.subheader("Ventanas peligrosas sugeridas")
-    danger_hour = by_hour[(by_hour["pnl_total"] < 0) | (by_hour["drawdown_promedio"] > by_hour["drawdown_promedio"].median())]
-    st.dataframe(danger_hour.sort_values("pnl_total"), use_container_width=True)
-
-    lineas = []
+    lines = []
     if not by_hour.empty:
-        best_hour = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
-        worst_hour = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
-        lineas.append(f"Mejor hora por PnL total: {int(best_hour['hora_inicio'])}:00.")
-        lineas.append(f"Peor hora por PnL total: {int(worst_hour['hora_inicio'])}:00.")
-    if not session_df.empty:
-        best_session = session_df.sort_values("pnl_total", ascending=False).iloc[0]
-        worst_session = session_df.sort_values("pnl_total", ascending=True).iloc[0]
-        lineas.append(f"Mejor sesión por PnL total: {best_session['sesion']}.")
-        lineas.append(f"Peor sesión por PnL total: {worst_session['sesion']}.")
-    mostrar_conclusion("Tiempo y Sesiones", lineas)
+        best_h = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
+        worst_h = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor hora por PnL total: {int(best_h['hora_inicio'])}:00.")
+        lines.append(f"Peor hora por PnL total: {int(worst_h['hora_inicio'])}:00.")
+    if not by_session.empty:
+        best_s = by_session.iloc[0]
+        worst_s = by_session.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor sesión: {best_s['sesion']}.")
+        lines.append(f"Sesión más débil: {worst_s['sesion']}.")
+    show_conclusion("Tiempo y Sesiones", lines)
 
 
-def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
+def render_motor_reversiones(ops_df: pd.DataFrame):
     st.header("Motor de Reversiones")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿cuántas reversiones ayudan y cuándo empiezan a ser peligrosas?")
+    show_help(
         "Motor de Reversiones",
-        "Esta página junta el viejo Motor de Reversiones y Reversal Quality. Aquí decidimos cuántas reversiones valen la pena y cuándo se vuelven peligrosas.",
+        "Versión simple. Sin calidad por pierna, sin cap simulation y sin exposición por pierna.",
         [
-            "¿Qué profundidad de reversal aporta PnL?",
-            "¿Dónde sube demasiado el drawdown?",
-            "¿Qué pasa si capamos el bot en 0, 1, 2, 3 o 4 reversals?",
-            "¿Las reversiones realmente recuperan o solo agrandan el riesgo?",
+            "¿El PnL empeora cuando suben las reversiones?",
+            "¿Qué cantidad de reversiones trae más drawdown?",
+            "¿La peor operación aparece con muchas reversiones?",
+            "¿Conviene limitar el bot antes de cierta profundidad?",
         ],
     )
 
@@ -858,107 +733,49 @@ def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    st.subheader("Resumen por cantidad real de reversals")
-    rev = aggregate_core(ops_df, ["reversal_count"])
-    rev = add_profit_factor_by_group(ops_df, rev, ["reversal_count"])
-    st.dataframe(rev.sort_values("reversal_count"), use_container_width=True)
+    rev = aggregate_core(ops_df, ["reversal_count"]).sort_values("reversal_count")
+    st.subheader("Resultado por cantidad de reversals")
+    st.dataframe(rev, use_container_width=True)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
-    ax.bar(rev["reversal_count"].fillna(0).astype(int).astype(str), rev["pnl_total"])
-    ax.set_title("PnL por Cantidad de Reversals")
-    ax.set_xlabel("Reversals")
-    ax.set_ylabel("PnL")
-    st.pyplot(fig)
-
-    if not legs_df.empty:
-        st.subheader("Calidad por pierna / reversal number")
-        leg_quality = legs_df.groupby("reversal_number", dropna=False).agg(
-            piernas=("operation_id", "count"),
-            pnl_total=("realized_pnl_currency", "sum"),
-            pnl_promedio=("realized_pnl_currency", "mean"),
-            qty_promedio=("entry_qty", "mean"),
-            qty_max=("entry_qty", "max"),
-            dd_promedio=("operation_drawdown_after_leg", "mean"),
-            runup_promedio=("operation_runup_after_leg", "mean"),
-        ).reset_index().sort_values("reversal_number")
-        st.dataframe(leg_quality, use_container_width=True)
-
+    if len(rev) > 0:
         fig, ax = plt.subplots(figsize=(9, 4))
-        ax.bar(leg_quality["reversal_number"].fillna(0).astype(int).astype(str), leg_quality["pnl_promedio"])
-        ax.set_title("PnL Promedio por Pierna/Reversal")
-        ax.set_xlabel("Reversal Number")
-        ax.set_ylabel("PnL Promedio")
+        ax.bar(rev["reversal_count"].fillna(0).astype(int).astype(str), rev["pnl_total"])
+        ax.set_title("PnL Total por Cantidad de Reversals")
+        ax.set_xlabel("Reversals")
+        ax.set_ylabel("PnL")
         st.pyplot(fig)
 
-    st.subheader("Simulación de cap de reversals")
-    max_real_rev = int(ops_df["reversal_count"].fillna(0).max())
-    cap_options = list(range(0, max_real_rev + 1))
-    if len(cap_options) == 0:
-        cap_options = [0]
+    st.subheader("Peores operaciones con reversals")
+    dangerous = ops_df.sort_values(["reversal_count", "operation_max_drawdown_currency"], ascending=[False, False]).head(25)
+    cols = [
+        "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count",
+        "sequence_net_pnl_currency", "operation_max_drawdown_currency", "sequence_end_reason",
+        "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "config_key",
+    ]
+    st.dataframe(dangerous[[c for c in cols if c in dangerous.columns]], use_container_width=True)
 
-    cap_rows = []
-    for cap in cap_options:
-        capped = apply_reversal_cap(ops_df, legs_df, cap)
-        pnl_col = capped["sequence_net_pnl_simulado"].fillna(0)
-        winners = pnl_col[pnl_col > 0]
-        losers = pnl_col[pnl_col < 0]
-        cap_rows.append(
-            {
-                "max_reversal_cap": cap,
-                "operaciones": len(capped),
-                "pnl_simulado": pnl_col.sum(),
-                "pnl_promedio": pnl_col.mean(),
-                "win_rate": (pnl_col > 0).mean() * 100,
-                "profit_factor": safe_div(winners.sum(), abs(losers.sum())),
-                "peor_operacion_simulada": pnl_col.min(),
-                "mejor_operacion_simulada": pnl_col.max(),
-            }
-        )
-    cap_df = pd.DataFrame(cap_rows)
-    st.dataframe(cap_df, use_container_width=True)
-
-    fig, ax = plt.subplots(figsize=(9, 4))
-    ax.bar(cap_df["max_reversal_cap"].astype(str), cap_df["pnl_simulado"])
-    ax.set_title("PnL Simulado por Cap de Reversals")
-    ax.set_xlabel("Cap")
-    ax.set_ylabel("PnL Simulado")
-    st.pyplot(fig)
-
-    st.subheader("Operaciones peligrosas por reversals")
-    dangerous = ops_df.sort_values(["reversal_count", "operation_max_drawdown_currency"], ascending=[False, False]).head(20)
-    st.dataframe(
-        dangerous[
-            [
-                "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count",
-                "sequence_net_pnl_currency", "operation_max_drawdown_currency", "sequence_end_reason",
-                "base_contracts", "config_key", "sesion", "hora_inicio",
-            ]
-        ],
-        use_container_width=True,
-    )
-
-    lineas = []
+    lines = []
     if not rev.empty:
-        best_rev = rev.sort_values("pnl_promedio", ascending=False).iloc[0]
-        worst_rev = rev.sort_values("pnl_promedio", ascending=True).iloc[0]
-        lineas.append(f"Mejor profundidad por PnL promedio: {int(best_rev['reversal_count']) if pd.notna(best_rev['reversal_count']) else 0} reversal(es).")
-        lineas.append(f"Peor profundidad por PnL promedio: {int(worst_rev['reversal_count']) if pd.notna(worst_rev['reversal_count']) else 0} reversal(es).")
-    if not cap_df.empty:
-        best_cap = cap_df.sort_values("pnl_simulado", ascending=False).iloc[0]
-        lineas.append(f"Mejor cap simulado por PnL total: {int(best_cap['max_reversal_cap'])} reversal(es).")
-    mostrar_conclusion("Motor de Reversiones", lineas)
+        best = rev.sort_values("pnl_promedio", ascending=False).iloc[0]
+        worst = rev.sort_values("pnl_promedio", ascending=True).iloc[0]
+        risky = rev.sort_values("drawdown_promedio", ascending=False).iloc[0]
+        lines.append(f"Mejor PnL promedio: {int(best['reversal_count']) if pd.notna(best['reversal_count']) else 0} reversal(es).")
+        lines.append(f"Peor PnL promedio: {int(worst['reversal_count']) if pd.notna(worst['reversal_count']) else 0} reversal(es).")
+        lines.append(f"Mayor drawdown promedio: {int(risky['reversal_count']) if pd.notna(risky['reversal_count']) else 0} reversal(es).")
+    show_conclusion("Motor de Reversiones", lines)
 
 
 def render_simulador_diario(ops_df: pd.DataFrame):
     st.header("Simulador Diario")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿qué pasa si aplico una meta diaria y una pérdida diaria de forma clara?")
+    show_help(
         "Simulador Diario",
-        "Esta página junta la meta diaria clásica y la simulación por sets. La de sets sigue tu lógica: consumir operaciones en orden hasta target/loss y luego empezar otro set con la siguiente operación.",
+        "Separado en dos bloques: stop diario clásico y sets diarios. Cada uno tiene su propia tabla clara.",
         [
-            "¿Qué meta diaria se alcanza antes que la pérdida?",
-            "¿Qué target/loss por set funciona mejor?",
-            "¿Cuántas operaciones consume cada set?",
-            "¿La lógica sobrevive mes por mes?",
+            "¿Cuántos días llegan a la meta antes que a la pérdida?",
+            "¿Cuántos días terminan abiertos sin tocar meta/loss?",
+            "¿La lógica de sets funciona mejor que parar el día completo?",
+            "¿La simulación sobrevive mes por mes?",
         ],
     )
 
@@ -966,88 +783,79 @@ def render_simulador_diario(ops_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    st.subheader("A. Stop diario clásico")
+    st.subheader("1. Stop diario clásico")
+    section_note("El día se detiene completo cuando toca la meta o la pérdida. Si no toca ninguna, queda con el resultado acumulado hasta el final del día.")
     c1, c2 = st.columns(2)
-    daily_target = c1.number_input("Meta Diaria", min_value=1.0, value=600.0, step=50.0)
-    daily_loss = c2.number_input("Pérdida Máxima Diaria", min_value=1.0, value=300.0, step=50.0)
+    daily_target = c1.number_input("Meta diaria", min_value=1.0, value=600.0, step=50.0, key="daily_target")
+    daily_loss = c2.number_input("Pérdida máxima diaria", min_value=1.0, value=300.0, step=50.0, key="daily_loss")
 
-    sim_df, metrics = simulate_daily_stop(ops_df, daily_target, daily_loss)
+    daily_df, daily_m = simulate_daily_stop(ops_df, daily_target, daily_loss)
+    c = st.columns(4)
+    with c[0]: card("PnL Simulado", fmt_money(daily_m.get("total_pnl", np.nan)))
+    with c[1]: card("Días Meta", fmt_pct(daily_m.get("target_days_pct", np.nan)))
+    with c[2]: card("Días Pérdida", fmt_pct(daily_m.get("loss_days_pct", np.nan)))
+    with c[3]: card("Días Abiertos", fmt_pct(daily_m.get("open_days_pct", np.nan)))
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Meta Primero %", fmt_pct(metrics.get("target_first_rate", np.nan)))
-    c2.metric("Pérdida Primero %", fmt_pct(metrics.get("loss_first_rate", np.nan)))
-    c3.metric("Ninguno %", fmt_pct(metrics.get("neither_rate", np.nan)))
-    c4.metric("PnL Simulado", fmt_money(metrics.get("total_simulated_pnl", np.nan)))
+    st.dataframe(daily_df.sort_values("trade_day"), use_container_width=True)
 
-    if not sim_df.empty:
-        st.dataframe(sim_df.sort_values("trade_day"), use_container_width=True)
-        monthly_stop = sim_df.groupby("month", as_index=False).agg(
-            dias=("trade_day", "count"),
-            pnl_simulado=("resultado_diario_simulado", "sum"),
-            promedio_diario=("resultado_diario_simulado", "mean"),
-            meta_primero_pct=("resultado", lambda s: (s == "meta_primero").mean() * 100),
-            perdida_primero_pct=("resultado", lambda s: (s == "perdida_primero").mean() * 100),
-        )
-        st.markdown("**Breakdown mensual del stop diario**")
-        st.dataframe(monthly_stop, use_container_width=True)
+    monthly_daily = daily_df.groupby("month", as_index=False).agg(
+        dias=("trade_day", "count"),
+        pnl_simulado=("simulated_day_pnl", "sum"),
+        promedio_dia=("simulated_day_pnl", "mean"),
+        meta_pct=("stop_reason", lambda s: (s == "Target reached").mean() * 100),
+        perdida_pct=("stop_reason", lambda s: (s == "Loss reached").mean() * 100),
+        abierto_pct=("stop_reason", lambda s: (s == "End of day").mean() * 100),
+    )
+    st.markdown("**Resumen mensual · Stop diario**")
+    st.dataframe(monthly_daily, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("B. Simulador de sets diarios")
+    st.subheader("2. Sets diarios")
+    section_note("El día se divide en sets. Cada set consume operaciones en orden hasta llegar al target o loss. Después, la siguiente operación empieza un nuevo set.")
     c1, c2 = st.columns(2)
-    set_target = c1.number_input("Target por Set", min_value=1.0, value=600.0, step=50.0)
-    set_loss = c2.number_input("Loss por Set", min_value=1.0, value=300.0, step=50.0)
+    set_target = c1.number_input("Target por set", min_value=1.0, value=600.0, step=50.0, key="set_target")
+    set_loss = c2.number_input("Loss por set", min_value=1.0, value=300.0, step=50.0, key="set_loss")
 
-    sets_df, set_metrics = simulate_daily_sets(ops_df, set_target, set_loss)
+    sets_df, sets_m = simulate_daily_sets(ops_df, set_target, set_loss)
+    c = st.columns(4)
+    with c[0]: card("PnL Sets", fmt_money(sets_m.get("total_pnl", np.nan)))
+    with c[1]: card("Sets Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
+    with c[2]: card("Sets Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
+    with c[3]: card("Ops/Set Prom", "-" if pd.isna(sets_m.get("avg_ops_per_set", np.nan)) else f"{sets_m['avg_ops_per_set']:.2f}")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sets", f"{set_metrics.get('sets', 0)}")
-    c2.metric("Set Win %", fmt_pct(set_metrics.get("set_win_rate", np.nan)))
-    c3.metric("Set Loss %", fmt_pct(set_metrics.get("set_loss_rate", np.nan)))
-    c4.metric("PnL Sets", fmt_money(set_metrics.get("total_set_pnl", np.nan)))
+    st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Promedio Set", fmt_money(set_metrics.get("avg_set_pnl", np.nan)))
-    c6.metric("Ops/Set Prom", f"{set_metrics.get('avg_operations_per_set', np.nan):.2f}" if set_metrics else "-")
-    c7.metric("Mejor Set", fmt_money(set_metrics.get("best_set", np.nan)))
-    c8.metric("Peor Set", fmt_money(set_metrics.get("worst_set", np.nan)))
+    monthly_sets = sets_df.groupby("month", as_index=False).agg(
+        sets=("set_number", "count"),
+        pnl_sets=("set_result", "sum"),
+        promedio_set=("set_result", "mean"),
+        meta_pct=("set_outcome", lambda s: (s == "Set target reached").mean() * 100),
+        perdida_pct=("set_outcome", lambda s: (s == "Set loss reached").mean() * 100),
+        abierto_pct=("set_outcome", lambda s: (s == "End of day").mean() * 100),
+        ops_por_set=("operations_used", "mean"),
+    )
+    st.markdown("**Resumen mensual · Sets diarios**")
+    st.dataframe(monthly_sets, use_container_width=True)
 
-    if not sets_df.empty:
-        st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
-        monthly_sets = sets_df.groupby("month", as_index=False).agg(
-            sets=("set_number", "count"),
-            pnl_sets=("set_result", "sum"),
-            promedio_set=("set_result", "mean"),
-            set_win_pct=("outcome", lambda s: (s == "set_win").mean() * 100),
-            set_loss_pct=("outcome", lambda s: (s == "set_loss").mean() * 100),
-            ops_por_set=("operations_used", "mean"),
-        )
-        st.markdown("**Breakdown mensual de sets**")
-        st.dataframe(monthly_sets, use_container_width=True)
-
-    lineas = []
-    if metrics:
-        if metrics["target_first_rate"] > metrics["loss_first_rate"]:
-            lineas.append("En el stop diario clásico, la meta se alcanza antes que la pérdida con mayor frecuencia.")
-        else:
-            lineas.append("En el stop diario clásico, la pérdida aparece demasiado fuerte frente a la meta.")
-    if set_metrics:
-        if set_metrics["set_win_rate"] > set_metrics["set_loss_rate"]:
-            lineas.append("En la simulación por sets, los sets ganadores superan a los sets perdedores.")
-        else:
-            lineas.append("En la simulación por sets, el ratio todavía no se ve cómodo.")
-    mostrar_conclusion("Simulador Diario", lineas)
+    lines = []
+    if daily_m:
+        lines.append("Stop diario: la meta se alcanza más que la pérdida." if daily_m["target_days_pct"] > daily_m["loss_days_pct"] else "Stop diario: la pérdida aparece demasiado cerca de la meta.")
+    if sets_m:
+        lines.append("Sets: hay más sets que alcanzan target que sets que alcanzan loss." if sets_m["target_sets_pct"] > sets_m["loss_sets_pct"] else "Sets: el balance target/loss todavía no se ve claro.")
+    show_conclusion("Simulador Diario", lines)
 
 
 def render_laboratorio_parametros(ops_df: pd.DataFrame):
     st.header("Laboratorio de Parámetros")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿qué setting tiene mejor balance entre PnL y riesgo?")
+    show_help(
         "Laboratorio de Parámetros",
-        "Aquí se comparan settings reales: base contracts, SL, TP, distance, reversals y config completa. También sirve para comparar 2, 3, 5, 7, 10 contratos.",
+        "Aquí comparamos base contracts, stop, target, distance, max reversals y configuración completa.",
         [
-            "¿Qué base contracts tiene mejor balance entre PnL y riesgo?",
-            "¿Qué config completa es más estable por mes?",
-            "¿Subir contratos mejora el PnL o agranda demasiado el peor caso?",
-            "¿Qué setting funciona en varios meses y no solo en uno?",
+            "¿Qué base contracts gana más sin disparar demasiado el peor caso?",
+            "¿Qué stop/target parece más estable?",
+            "¿Qué configuración funciona en varios meses?",
+            "¿Subir contratos aumenta demasiado el drawdown o la peor operación?",
         ],
     )
 
@@ -1055,19 +863,13 @@ def render_laboratorio_parametros(ops_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    param_options = [
-        "base_contracts",
-        "fixed_stop_ticks",
-        "fixed_target_ticks",
-        "distance_points",
-        "max_reversals_allowed",
-        "config_key",
-    ]
-    param = st.selectbox("Comparar por", param_options)
+    param = st.selectbox(
+        "Comparar por",
+        ["base_contracts", "fixed_stop_ticks", "fixed_target_ticks", "distance_points", "max_reversals_allowed", "config_key"],
+    )
 
-    grouped = aggregate_core(ops_df, [param])
-    grouped = add_profit_factor_by_group(ops_df, grouped, [param])
-    grouped = grouped.sort_values("pnl_total", ascending=False)
+    grouped = aggregate_core(ops_df, [param]).sort_values("pnl_total", ascending=False)
+    st.subheader("Comparación principal")
     st.dataframe(grouped, use_container_width=True)
 
     if len(grouped) > 1:
@@ -1079,38 +881,39 @@ def render_laboratorio_parametros(ops_df: pd.DataFrame):
         ax.tick_params(axis="x", rotation=45)
         st.pyplot(fig)
 
-    st.subheader("Estabilidad mensual por parámetro")
+    st.subheader("Riesgo por tamaño de contrato")
+    section_note("Esto reemplaza la vieja sección confusa de exposición por pierna. Aquí vemos si más contratos mejoran el resultado o solo agrandan el riesgo.")
+    contract_risk = aggregate_core(ops_df, ["base_contracts"]).sort_values("base_contracts")
+    st.dataframe(contract_risk, use_container_width=True)
+
     if ops_df["month"].nunique() > 1:
-        monthly_param = aggregate_core(ops_df, ["month", param])
-        monthly_param = add_profit_factor_by_group(ops_df, monthly_param, ["month", param])
-        st.dataframe(monthly_param.sort_values([param, "month"]), use_container_width=True)
-    else:
-        st.info("Cuando cargues más de un mes, aquí se verá si el setting funciona de forma estable o solo fue suerte de un mes.")
+        st.subheader("Estabilidad mensual por parámetro")
+        monthly_param = aggregate_core(ops_df, ["month", param]).sort_values(["month", param])
+        st.dataframe(monthly_param, use_container_width=True)
 
-    st.subheader("Contract Exposure")
-    contract_df = aggregate_core(ops_df, ["base_contracts"])
-    contract_df = add_profit_factor_by_group(ops_df, contract_df, ["base_contracts"])
-    st.dataframe(contract_df.sort_values("base_contracts"), use_container_width=True)
-
-    lineas = []
+    lines = []
     if not grouped.empty:
-        best = grouped.sort_values("pnl_total", ascending=False).iloc[0]
-        worst_risk = grouped.sort_values("peor_operacion", ascending=True).iloc[0]
-        lineas.append(f"Mejor valor por PnL total para {param}: {best[param]}.")
-        lineas.append(f"Valor con peor operación más agresiva para {param}: {worst_risk[param]}.")
-    mostrar_conclusion("Laboratorio de Parámetros", lineas)
+        best_pnl = grouped.iloc[0]
+        best_pf = grouped.sort_values("profit_factor", ascending=False).iloc[0]
+        lines.append(f"Mejor PnL total: {param} = {best_pnl[param]}.")
+        lines.append(f"Mejor profit factor: {param} = {best_pf[param]}.")
+    if not contract_risk.empty:
+        worst_risk = contract_risk.sort_values("peor_operacion", ascending=True).iloc[0]
+        lines.append(f"Mayor peor caso por base contracts: {worst_risk['base_contracts']} contratos.")
+    show_conclusion("Laboratorio de Parámetros", lines)
 
 
-def render_risk_killers(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
+def render_risk_killers(ops_df: pd.DataFrame):
     st.header("Risk Killers")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿qué cosas están dañando el bot más rápido?")
+    show_help(
         "Risk Killers",
-        "Esta página busca lo que más está dañando el bot. La idea no es ver todo, sino encontrar qué bloquear o limitar primero.",
+        "Lista práctica de los riesgos que conviene revisar primero.",
         [
             "¿Cuáles son las peores operaciones?",
-            "¿Qué días tuvieron más daño?",
-            "¿Qué horas/sesiones son peligrosas?",
-            "¿Qué operaciones terminaron positivas pero con drawdown feo?",
+            "¿Qué días dañan el resultado?",
+            "¿Hay ganadoras con drawdown demasiado feo?",
+            "¿Qué horas o sesiones son más peligrosas?",
         ],
     )
 
@@ -1118,86 +921,67 @@ def render_risk_killers(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    st.subheader("Peores operaciones")
-    worst_ops = ops_df.sort_values("sequence_net_pnl_currency").head(20)
-    st.dataframe(
-        worst_ops[
-            [
-                "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
-                "operation_max_drawdown_currency", "reversal_count", "base_contracts", "sequence_end_reason",
-                "sesion", "hora_inicio", "config_key",
-            ]
-        ],
-        use_container_width=True,
-    )
+    cols = [
+        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
+        "operation_max_drawdown_currency", "reversal_count", "base_contracts", "max_contracts_used",
+        "sesion", "hora_inicio", "sequence_end_reason", "config_key",
+    ]
+    cols = [c for c in cols if c in ops_df.columns]
 
-    st.subheader("Días más peligrosos")
-    daily = ops_df.groupby(["month", "trade_day"], as_index=False).agg(
+    st.subheader("Peores operaciones")
+    worst_ops = ops_df.sort_values("sequence_net_pnl_currency", ascending=True).head(25)
+    st.dataframe(worst_ops[cols], use_container_width=True)
+
+    st.subheader("Peores días")
+    worst_days = ops_df.groupby(["month", "trade_day"], as_index=False).agg(
+        pnl_dia=("sequence_net_pnl_currency", "sum"),
         operaciones=("operation_id", "count"),
-        pnl_diario=("sequence_net_pnl_currency", "sum"),
         peor_operacion=("sequence_net_pnl_currency", "min"),
         drawdown_max=("operation_max_drawdown_currency", "max"),
         reversiones_promedio=("reversal_count", "mean"),
-        reversiones_max=("reversal_count", "max"),
-    )
-    st.dataframe(daily.sort_values(["pnl_diario", "drawdown_max"], ascending=[True, False]).head(20), use_container_width=True)
+        contratos_max=("max_contracts_used", "max"),
+    ).sort_values("pnl_dia", ascending=True).head(25)
+    st.dataframe(worst_days, use_container_width=True)
 
     st.subheader("Ganadoras peligrosas")
-    dd_threshold = st.number_input("Drawdown mínimo para marcar ganadora peligrosa", min_value=0.0, value=300.0, step=50.0)
-    risky_winners = ops_df[(ops_df["sequence_net_pnl_currency"] > 0) & (ops_df["operation_max_drawdown_currency"] >= dd_threshold)]
-    st.dataframe(
-        risky_winners.sort_values("operation_max_drawdown_currency", ascending=False)[
-            [
-                "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
-                "operation_max_drawdown_currency", "reversal_count", "base_contracts", "sesion", "hora_inicio", "config_key",
-            ]
-        ].head(30),
-        use_container_width=True,
-    )
+    section_note("Operaciones que cerraron positivas, pero sufrieron mucho drawdown. Estas pueden verse bien en PnL, pero ser malas para operar en vivo.")
+    winners_bad_dd = ops_df[ops_df["sequence_net_pnl_currency"] > 0].sort_values("operation_max_drawdown_currency", ascending=False).head(25)
+    st.dataframe(winners_bad_dd[cols], use_container_width=True)
 
-    st.subheader("Peores horas y sesiones")
     c1, c2 = st.columns(2)
     with c1:
-        by_hour = aggregate_core(ops_df, ["hora_inicio"])
-        st.dataframe(by_hour.sort_values("pnl_total").head(10), use_container_width=True)
+        st.subheader("Horas peligrosas")
+        bad_hours = aggregate_core(ops_df, ["hora_inicio"]).sort_values("pnl_total", ascending=True).head(10)
+        st.dataframe(bad_hours, use_container_width=True)
     with c2:
-        by_session = aggregate_core(ops_df, ["sesion"])
-        st.dataframe(by_session.sort_values("pnl_total").head(10), use_container_width=True)
+        st.subheader("Sesiones peligrosas")
+        bad_sessions = aggregate_core(ops_df, ["sesion"]).sort_values("pnl_total", ascending=True)
+        st.dataframe(bad_sessions, use_container_width=True)
 
-    if not legs_df.empty:
-        st.subheader("Mayor exposición de contratos por pierna")
-        exposure = legs_df.sort_values("entry_qty", ascending=False).head(30)
-        st.dataframe(
-            exposure[
-                [
-                    "month", "trade_day", "operation_id", "leg_index", "reversal_number", "direction",
-                    "entry_qty", "realized_pnl_currency", "cumulative_sequence_pnl_after_leg", "exit_reason",
-                    "sesion", "hora_inicio", "config_key",
-                ]
-            ],
-            use_container_width=True,
-        )
-
-    lineas = []
+    lines = []
     if not worst_ops.empty:
-        w = worst_ops.iloc[0]
-        lineas.append(f"Peor operación: {w['operation_id']} con PnL {fmt_money(w['sequence_net_pnl_currency'])}.")
-    if not daily.empty:
-        d = daily.sort_values("pnl_diario").iloc[0]
-        lineas.append(f"Peor día: {d['trade_day']} con PnL {fmt_money(d['pnl_diario'])}.")
-    mostrar_conclusion("Risk Killers", lineas)
+        row = worst_ops.iloc[0]
+        lines.append(f"Peor operación: {row['operation_id']} con PnL {fmt_money(row['sequence_net_pnl_currency'])}.")
+    if not worst_days.empty:
+        row = worst_days.iloc[0]
+        lines.append(f"Peor día: {row['trade_day']} con PnL {fmt_money(row['pnl_dia'])}.")
+    if not bad_hours.empty:
+        row = bad_hours.iloc[0]
+        lines.append(f"Hora más débil por PnL: {int(row['hora_inicio'])}:00.")
+    show_conclusion("Risk Killers", lines)
 
 
 def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.header("Explorador de Operaciones")
-    mostrar_bloque_ayuda(
+    section_note("Esta página responde: ¿qué pasó exactamente dentro de una operación?")
+    show_help(
         "Explorador de Operaciones",
-        "Aquí se inspecciona una operación individual con todas sus piernas, PnL acumulado, contratos y simulación por cap de reversals.",
+        "Detalle técnico por operación. Aquí sí vemos piernas, contratos, PnL acumulado y motivos de salida.",
         [
-            "¿Cómo evolucionó el PnL pierna por pierna?",
-            "¿Cuántos contratos usó cada reversal?",
-            "¿Qué habría pasado con un cap menor?",
-            "¿La operación fue sana o una recuperación peligrosa?",
+            "¿Dónde entró y salió cada pierna?",
+            "¿Cómo evolucionó el PnL acumulado?",
+            "¿Cuántos contratos se usaron?",
+            "¿La recuperación fue sana o demasiado peligrosa?",
         ],
     )
 
@@ -1205,88 +989,81 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    filtro_df = ops_df.copy()
+    filtered = ops_df.copy()
 
-    st.subheader("Filtros internos")
+    st.subheader("Filtros de búsqueda")
     c1, c2, c3 = st.columns(3)
-
     with c1:
-        sesiones = sorted(filtro_df["sesion"].dropna().unique().tolist())
-        sesiones_sel = st.multiselect("Sesiones", sesiones, default=sesiones)
+        search_id = st.text_input("Buscar operation_id", "")
     with c2:
-        razones = sorted(filtro_df["sequence_end_reason"].dropna().unique().tolist())
-        razones_sel = st.multiselect("Razón de cierre", razones, default=razones)
+        only_losers = st.checkbox("Solo operaciones perdedoras", value=False)
     with c3:
-        max_rev_available = int(filtro_df["reversal_count"].fillna(0).max())
-        max_reversal_permitido = st.selectbox("Máximo reversal simulado", list(range(0, max_rev_available + 1)), index=max_rev_available)
+        min_reversal = st.number_input("Reversal mínimo", min_value=0, value=0, step=1)
 
-    text_search = st.text_input("Buscar operation_id", "")
+    if search_id.strip():
+        filtered = filtered[filtered["operation_id"].astype(str).str.contains(search_id.strip(), case=False, na=False)]
+    if only_losers:
+        filtered = filtered[filtered["sequence_net_pnl_currency"] < 0]
+    filtered = filtered[filtered["reversal_count"].fillna(0) >= min_reversal]
 
-    if sesiones_sel:
-        filtro_df = filtro_df[filtro_df["sesion"].isin(sesiones_sel)]
-    if razones_sel:
-        filtro_df = filtro_df[filtro_df["sequence_end_reason"].isin(razones_sel)]
-    if text_search.strip():
-        filtro_df = filtro_df[filtro_df["operation_id"].astype(str).str.contains(text_search.strip(), case=False, na=False)]
-
-    if filtro_df.empty:
+    if filtered.empty:
         st.warning("No hay operaciones con esos filtros.")
         return
 
-    filtro_df = apply_reversal_cap(filtro_df, legs_df, max_reversal_permitido)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Operaciones visibles", f"{len(filtro_df)}")
-    c2.metric("PnL Real", fmt_money(filtro_df["sequence_net_pnl_currency"].sum()))
-    c3.metric("PnL Simulado Cap", fmt_money(filtro_df["sequence_net_pnl_simulado"].sum()))
-
-    display_cols = [
-        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_end_reason", "sequence_end_reason_simulado",
-        "reversal_count", "reversal_count_simulado", "sequence_net_pnl_currency", "sequence_net_pnl_simulado",
-        "operation_max_drawdown_currency", "operation_max_runup_currency", "base_contracts", "sesion", "hora_inicio", "config_key",
+    list_cols = [
+        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
+        "operation_max_drawdown_currency", "operation_max_runup_currency", "reversal_count",
+        "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "config_key",
     ]
-    st.dataframe(filtro_df[display_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+    list_cols = [c for c in list_cols if c in filtered.columns]
+    st.dataframe(filtered[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
 
-    op_ids = filtro_df.sort_values("sequence_started_at", ascending=False)["operation_id"].dropna().astype(str).tolist()
-    selected_op = st.selectbox("Inspeccionar operación", op_ids)
-
-    if not selected_op:
+    op_ids = filtered.sort_values("sequence_started_at", ascending=False)["operation_id"].astype(str).tolist()
+    selected = st.selectbox("Seleccionar operación", op_ids)
+    if not selected:
         return
 
-    op_row = filtro_df.loc[filtro_df["operation_id"].astype(str) == str(selected_op)]
-    if op_row.empty:
-        return
-
-    st.subheader("Resumen de operación")
+    op_row = filtered[filtered["operation_id"].astype(str) == selected]
+    st.subheader("Resumen de la operación")
     st.dataframe(op_row, use_container_width=True)
 
-    st.subheader("Piernas")
-    legs_op = legs_df.loc[legs_df["operation_id"].astype(str) == str(selected_op)].sort_values("leg_index")
+    st.subheader("Piernas de la operación")
+    if legs_df.empty:
+        st.info("No hay piernas cargadas para esta operación.")
+        return
+
+    legs_op = legs_df[legs_df["operation_id"].astype(str) == selected].sort_values("leg_index")
+    if legs_op.empty:
+        st.info("No se encontraron piernas para esta operación.")
+        return
+
     st.dataframe(legs_op, use_container_width=True)
 
-    if not legs_op.empty:
+    if "cumulative_sequence_pnl_after_leg" in legs_op.columns:
         fig, ax = plt.subplots(figsize=(9, 4))
         ax.plot(legs_op["leg_index"].astype(str), legs_op["cumulative_sequence_pnl_after_leg"], marker="o")
-        ax.set_title("PnL acumulado por pierna")
+        ax.set_title("PnL Acumulado por Pierna")
         ax.set_xlabel("Pierna")
-        ax.set_ylabel("PnL acumulado")
+        ax.set_ylabel("PnL Acumulado")
         st.pyplot(fig)
 
+    if "entry_qty" in legs_op.columns:
         fig, ax = plt.subplots(figsize=(9, 4))
         ax.bar(legs_op["leg_index"].astype(str), legs_op["entry_qty"])
-        ax.set_title("Contratos por pierna")
+        ax.set_title("Contratos por Pierna")
         ax.set_xlabel("Pierna")
         ax.set_ylabel("Contratos")
         st.pyplot(fig)
 
-    fila = op_row.iloc[0]
-    st.subheader("Lectura rápida")
-    st.markdown(f"- Reversals reales: **{int(fila['reversal_count']) if pd.notna(fila['reversal_count']) else 0}**")
-    st.markdown(f"- Reversals simulados con cap {max_reversal_permitido}: **{int(fila['reversal_count_simulado']) if pd.notna(fila['reversal_count_simulado']) else 0}**")
-    st.markdown(f"- PnL real: **{fmt_money(fila['sequence_net_pnl_currency'])}**")
-    st.markdown(f"- PnL simulado: **{fmt_money(fila['sequence_net_pnl_simulado'])}**")
-    st.markdown(f"- Drawdown operación: **{fmt_money(fila['operation_max_drawdown_currency'])}**")
-    st.markdown(f"- Sesión: **{fila['sesion']}** | Hora: **{fila['hora_inicio']}:00**")
+    row = op_row.iloc[0]
+    lines = [
+        f"PnL final: {fmt_money(row['sequence_net_pnl_currency'])}.",
+        f"Reversals reales: {int(row['reversal_count']) if pd.notna(row['reversal_count']) else 0}.",
+        f"Drawdown máximo: {fmt_money(row['operation_max_drawdown_currency'])}.",
+        f"Máximo contratos usados: {fmt_money(row['max_contracts_used'])}.",
+        f"Razón de cierre: {row['sequence_end_reason']}.",
+    ]
+    show_conclusion("Operación seleccionada", lines)
 
 
 # ============================================================
@@ -1296,7 +1073,7 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
 def main():
     st.title("Laboratorio WLF")
-    st.caption("Lab limpio: global, mensual, diario, tiempo/sesiones, reversals, simulación, parámetros, riesgo y operación detallada.")
+    st.caption("Análisis simple para decidir qué mantener, qué bloquear y qué setting probar.")
 
     uploaded_files = st.sidebar.file_uploader(
         "Cargar archivos JSONL mensuales",
@@ -1308,8 +1085,11 @@ def main():
     ops_df, legs_df = build_dataframes(records)
 
     if ops_df.empty:
-        st.warning("No se cargaron registros JSONL. Sube uno o más archivos JSONL.")
+        st.warning("Sube uno o más JSONL para iniciar el análisis.")
         return
+
+    st.sidebar.metric("Operaciones cargadas", len(ops_df))
+    st.sidebar.metric("Piernas cargadas", len(legs_df))
 
     ops_filtered, legs_filtered = apply_global_filters(ops_df, legs_df)
 
@@ -1331,13 +1111,13 @@ def main():
     elif page == "Tiempo y Sesiones":
         render_tiempo_y_sesiones(ops_filtered)
     elif page == "Motor de Reversiones":
-        render_motor_reversiones(ops_filtered, legs_filtered)
+        render_motor_reversiones(ops_filtered)
     elif page == "Simulador Diario":
         render_simulador_diario(ops_filtered)
     elif page == "Laboratorio de Parámetros":
         render_laboratorio_parametros(ops_filtered)
     elif page == "Risk Killers":
-        render_risk_killers(ops_filtered, legs_filtered)
+        render_risk_killers(ops_filtered)
     elif page == "Explorador de Operaciones":
         render_explorador_operaciones(ops_filtered, legs_filtered)
 
