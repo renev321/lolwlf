@@ -815,45 +815,46 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         return
 
     # ========================================================
-    # MAX LOST CONTINUE - visible at the TOP of the dashboard
+    # MAIN HEALTH CARDS + MAX LOST CONTINUE DROPDOWN
     # ========================================================
-    st.subheader("Max Lost Continue")
+    st.subheader("Salud General")
+
+    # Default risk calculation: by real legs, because every leg is a real entry/exit.
+    streak_df = build_consecutive_loss_streaks(
+        legs_df,
+        pnl_col="realized_pnl_currency",
+        time_col="exit_time",
+        id_col="operation_id",
+        unit_label="Pierna",
+    )
+
+    m = overview_metrics(ops_df)
+    c = st.columns(5)
+    with c[0]: card("Operaciones", f"{m['ops']}")
+    with c[1]: card("Días", f"{m['days']}")
+    with c[2]: card("PnL Total", fmt_money(m["pnl"]))
+    with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
+    with c[4]:
+        max_loss_streak_rows = st.selectbox(
+            "Max Lost Continue",
+            options=[5, 10, 15, 25, 50, 100],
+            index=1,
+            key="dashboard_max_loss_streak_rows",
+            help="Cantidad máxima de rachas de pérdida continua que quieres mostrar abajo.",
+        )
+
+    c = st.columns(4)
+    with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
+    with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
+    with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
+    with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
+
+    # Small risk summary directly under the health cards. No separate big top panel.
+    st.markdown("### Max Lost Continue")
     section_note(
-        "Este control está arriba porque es clave para riesgo: muestra las peores rachas de pérdidas consecutivas. "
-        "Por defecto usa piernas reales, porque cada pierna es una entrada/salida real."
+        "Basado en piernas reales: cada pierna cerrada suma o resta PnL. "
+        "El dropdown de arriba controla cuántas rachas se muestran en la tabla."
     )
-
-    c1, c2 = st.columns(2)
-    loss_streak_mode = c1.selectbox(
-        "Analizar pérdida continua por",
-        options=["Piernas reales", "Operaciones completas"],
-        index=0,
-        key="dashboard_loss_streak_mode",
-    )
-    max_loss_streak_rows = c2.selectbox(
-        "Max dropdown · rachas a mostrar",
-        options=[5, 10, 15, 25, 50, 100],
-        index=1,
-        key="dashboard_max_loss_streak_rows",
-        help="Controla cuántas rachas de pérdida continua quieres ver en la tabla.",
-    )
-
-    if loss_streak_mode == "Piernas reales":
-        streak_df = build_consecutive_loss_streaks(
-            legs_df,
-            pnl_col="realized_pnl_currency",
-            time_col="exit_time",
-            id_col="operation_id",
-            unit_label="Pierna",
-        )
-    else:
-        streak_df = build_consecutive_loss_streaks(
-            ops_df,
-            pnl_col="sequence_net_pnl_currency",
-            time_col="sequence_started_at",
-            id_col="operation_id",
-            unit_label="Operación",
-        )
 
     if streak_df.empty:
         st.info("No se encontraron rachas de pérdidas con los filtros actuales.")
@@ -872,25 +873,6 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             streak_df[show_cols].head(int(max_loss_streak_rows)),
             use_container_width=True,
         )
-
-    st.markdown("---")
-
-    # ========================================================
-    # MAIN HEALTH CARDS
-    # ========================================================
-    st.subheader("Salud General")
-    m = overview_metrics(ops_df)
-    c = st.columns(4)
-    with c[0]: card("Operaciones", f"{m['ops']}")
-    with c[1]: card("Días", f"{m['days']}")
-    with c[2]: card("PnL Total", fmt_money(m["pnl"]))
-    with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
-
-    c = st.columns(4)
-    with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
-    with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
-    with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
-    with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
 
     st.markdown("---")
     st.subheader("Simulación rápida por máximo reversal permitido")
