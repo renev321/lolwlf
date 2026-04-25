@@ -380,6 +380,41 @@ def overview_metrics(ops_df: pd.DataFrame) -> Dict[str, float]:
 
 
 # ============================================================
+
+def monthly_summary(ops_df: pd.DataFrame) -> pd.DataFrame:
+    """Simple month-by-month health table used by Dashboard General."""
+    if ops_df.empty or "month" not in ops_df.columns:
+        return pd.DataFrame()
+    grouped = aggregate_core(ops_df, ["month"])
+    if grouped.empty:
+        return grouped
+    preferred_cols = [
+        "month", "operaciones", "pnl_total", "profit_factor", "tasa_acierto",
+        "pnl_promedio", "peor_operacion", "mejor_operacion", "drawdown_max",
+        "reversiones_promedio", "contratos_max",
+    ]
+    cols = [c for c in preferred_cols if c in grouped.columns]
+    return grouped[cols].sort_values("month")
+
+
+def daily_summary(ops_df: pd.DataFrame) -> pd.DataFrame:
+    """Simple day-by-day health table used by Dashboard General."""
+    if ops_df.empty or "trade_day" not in ops_df.columns:
+        return pd.DataFrame()
+    grouped = aggregate_core(ops_df, ["trade_day"])
+    if grouped.empty:
+        return grouped
+    if "month" in ops_df.columns:
+        day_month = ops_df.groupby("trade_day", dropna=False).agg(month=("month", "first")).reset_index()
+        grouped = grouped.merge(day_month, on="trade_day", how="left")
+    preferred_cols = [
+        "month", "trade_day", "operaciones", "pnl_total", "profit_factor",
+        "tasa_acierto", "peor_operacion", "mejor_operacion", "drawdown_max",
+        "reversiones_promedio", "contratos_max",
+    ]
+    cols = [c for c in preferred_cols if c in grouped.columns]
+    return grouped[cols].sort_values("trade_day")
+
 # SIMULATIONS
 # ============================================================
 
@@ -940,10 +975,11 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
     with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
 
-    st.markdown("### Max Drawdown del account")
+    st.markdown("### Caída máxima de la cuenta")
     section_note(
-        "Esto mide cuánto llegó a caer la cuenta desde un máximo anterior hasta el punto más bajo siguiente. "
-        "Se calcula con piernas reales cerradas, no con operaciones completas."
+        "Esto muestra cuánto bajó la cuenta después de estar en su mejor punto. "
+        "La línea azul es la cuenta actual. La línea naranja es el mejor punto alcanzado. "
+        "La distancia entre ambas es la caída de la cuenta."
     )
 
     if equity_curve.empty:
@@ -951,20 +987,28 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     else:
         c = st.columns(4)
         with c[0]: card("Max Drawdown", fmt_money(dd_metrics.get("max_drawdown", np.nan)))
-        with c[1]: card("Equity Peak", fmt_money(dd_metrics.get("peak_equity", np.nan)))
-        with c[2]: card("Equity Final", fmt_money(dd_metrics.get("ending_equity", np.nan)))
-        with c[3]: card("Drawdown Actual", fmt_money(dd_metrics.get("ending_drawdown", np.nan)))
+        with c[1]: card("Mejor Punto", fmt_money(dd_metrics.get("peak_equity", np.nan)))
+        with c[2]: card("Cuenta Final", fmt_money(dd_metrics.get("ending_equity", np.nan)))
+        with c[3]: card("Caída Actual", fmt_money(dd_metrics.get("ending_drawdown", np.nan)))
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(equity_curve["event_time"], equity_curve["equity"])
-        ax.plot(equity_curve["event_time"], equity_curve["peak_equity"])
-        ax.set_title("Equity Curve basada en piernas cerradas")
-        ax.set_ylabel("PnL acumulado")
+        ax.plot(equity_curve["event_time"], equity_curve["equity"], label="Cuenta actual")
+        ax.plot(equity_curve["event_time"], equity_curve["peak_equity"], label="Mejor punto alcanzado")
+        ax.fill_between(
+            equity_curve["event_time"],
+            equity_curve["equity"],
+            equity_curve["peak_equity"],
+            where=equity_curve["equity"] < equity_curve["peak_equity"],
+            alpha=0.15,
+        )
+        ax.set_title("Cuenta vs mejor punto alcanzado")
+        ax.set_ylabel("Ganancia acumulada")
+        ax.legend(loc="best")
         ax.tick_params(axis="x", rotation=35)
         st.pyplot(fig)
 
         if not dd_periods.empty:
-            st.markdown("**Peores caídas continuas de la cuenta**")
+            st.markdown("**Peores momentos donde la cuenta cayó**")
             st.dataframe(
                 dd_periods[[
                     "peak_time", "trough_time", "recovered_time", "peak_equity", "trough_equity",
