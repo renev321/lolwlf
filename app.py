@@ -384,42 +384,88 @@ def overview_metrics(ops_df: pd.DataFrame) -> Dict[str, float]:
 # ============================================================
 
 
-def simulate_daily_stop(ops_df: pd.DataFrame, daily_target: float, daily_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def _prepare_leg_timeline(legs_df: pd.DataFrame) -> pd.DataFrame:
+    """Return one row per real executed leg, ordered by the moment the PnL becomes known.
+
+    For daily target/loss math we use legs, not operation totals.
+    A leg is the real entry/exit unit. The realized PnL is only known at exit,
+    so the simulator accumulates PnL by exit_time. If exit_time is missing,
+    it falls back to entry_time and then sequence_started_at.
+    """
+    if legs_df.empty:
+        return pd.DataFrame()
+
+    legs = legs_df.copy()
+    legs["event_time"] = legs["exit_time"]
+    legs["event_time"] = legs["event_time"].fillna(legs["entry_time"])
+    legs["event_time"] = legs["event_time"].fillna(legs["sequence_started_at"])
+
+    if "trade_day" not in legs.columns or legs["trade_day"].isna().all():
+        legs["trade_day"] = legs["event_time"].dt.date
+
+    legs["leg_pnl"] = pd.to_numeric(legs["realized_pnl_currency"], errors="coerce").fillna(0.0)
+    legs["leg_sort"] = pd.to_numeric(legs["leg_index"], errors="coerce").fillna(0)
+
+    return legs.sort_values(["trade_day", "event_time", "operation_id", "leg_sort"]).copy()
+
+
+def simulate_daily_stop(legs_df: pd.DataFrame, daily_target: float, daily_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Classic daily stop using real legs.
+
+    The simulator consumes legs chronologically. After every closed leg, it checks
+    whether the accumulated realized PnL reached the target or loss.
+    """
     rows = []
-    if ops_df.empty:
+    legs = _prepare_leg_timeline(legs_df)
+    if legs.empty:
         return pd.DataFrame(), {}
 
-    for trade_day, day_df in ops_df.sort_values("sequence_started_at").groupby("trade_day"):
+    for trade_day, day_df in legs.groupby("trade_day", dropna=False):
         running = 0.0
         reason = "End of day"
-        stopped_after = None
-        ops_used = 0
+        stopped_after_operation = None
+        stopped_after_leg = None
+        stopped_at_time = pd.NaT
+        legs_used = 0
+        touched_ops = set()
+        raw_pnl_at_stop = 0.0
 
         for _, row in day_df.iterrows():
-            running += float(row["sequence_net_pnl_currency"] or 0)
-            stopped_after = row["operation_id"]
-            ops_used += 1
+            running += float(row.get("leg_pnl", 0.0) or 0.0)
+            raw_pnl_at_stop = running
+            stopped_after_operation = row.get("operation_id")
+            stopped_after_leg = row.get("leg_index")
+            stopped_at_time = row.get("event_time")
+            legs_used += 1
+            if pd.notna(row.get("operation_id")):
+                touched_ops.add(row.get("operation_id"))
 
             if running >= daily_target:
-                running = daily_target
                 reason = "Target reached"
+                running = daily_target
                 break
             if running <= -daily_loss:
-                running = -daily_loss
                 reason = "Loss reached"
+                running = -daily_loss
                 break
 
+        month_value = day_df["month"].dropna().iloc[0] if "month" in day_df.columns and not day_df["month"].dropna().empty else ""
         rows.append(
             {
-                "month": day_df["month"].iloc[0],
+                "month": month_value,
                 "trade_day": trade_day,
                 "simulated_day_pnl": running,
+                "raw_pnl_at_stop": raw_pnl_at_stop,
                 "result": "Win" if running > 0 else "Loss" if running < 0 else "Flat",
                 "stop_reason": reason,
-                "operations_used": ops_used,
-                "stopped_after_operation": stopped_after,
-                "real_day_pnl": day_df["sequence_net_pnl_currency"].sum(),
-                "real_operations": len(day_df),
+                "legs_used": legs_used,
+                "operations_touched": len(touched_ops),
+                "stopped_after_operation": stopped_after_operation,
+                "stopped_after_leg": stopped_after_leg,
+                "stopped_at_time": stopped_at_time,
+                "real_day_pnl_legs": day_df["leg_pnl"].sum(),
+                "real_legs": len(day_df),
+                "real_operations_touched": day_df["operation_id"].nunique(),
             }
         )
 
@@ -434,30 +480,47 @@ def simulate_daily_stop(ops_df: pd.DataFrame, daily_target: float, daily_loss: f
         "winning_days_pct": (sim["simulated_day_pnl"] > 0).mean() * 100,
         "best_day": sim["simulated_day_pnl"].max(),
         "worst_day": sim["simulated_day_pnl"].min(),
+        "avg_legs_used": sim["legs_used"].mean(),
     }
     return sim, metrics
 
 
-def simulate_daily_sets(ops_df: pd.DataFrame, set_target: float, set_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def simulate_daily_sets(legs_df: pd.DataFrame, set_target: float, set_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Daily set simulator using legs.
+
+    A set consumes real legs in chronological order. When the running set PnL
+    reaches target/loss, that set closes and the next leg starts a new set.
+    """
     rows = []
-    if ops_df.empty:
+    legs = _prepare_leg_timeline(legs_df)
+    if legs.empty:
         return pd.DataFrame(), {}
 
-    for trade_day, day_df in ops_df.sort_values("sequence_started_at").groupby("trade_day"):
+    for trade_day, day_df in legs.groupby("trade_day", dropna=False):
         set_number = 1
         running = 0.0
-        ops_used = 0
-        set_start_op = None
-        set_start_time = None
+        raw_running = 0.0
+        legs_used = 0
+        touched_ops = set()
+        set_start_operation = None
+        set_start_leg = None
+        set_start_time = pd.NaT
 
         for _, row in day_df.iterrows():
-            if ops_used == 0:
+            if legs_used == 0:
                 running = 0.0
-                set_start_op = row["operation_id"]
-                set_start_time = row["sequence_started_at"]
+                raw_running = 0.0
+                touched_ops = set()
+                set_start_operation = row.get("operation_id")
+                set_start_leg = row.get("leg_index")
+                set_start_time = row.get("event_time")
 
-            running += float(row["sequence_net_pnl_currency"] or 0)
-            ops_used += 1
+            leg_pnl = float(row.get("leg_pnl", 0.0) or 0.0)
+            running += leg_pnl
+            raw_running = running
+            legs_used += 1
+            if pd.notna(row.get("operation_id")):
+                touched_ops.add(row.get("operation_id"))
 
             outcome = None
             result = None
@@ -469,39 +532,53 @@ def simulate_daily_sets(ops_df: pd.DataFrame, set_target: float, set_loss: float
                 result = -set_loss
 
             if outcome:
+                month_value = day_df["month"].dropna().iloc[0] if "month" in day_df.columns and not day_df["month"].dropna().empty else ""
                 rows.append(
                     {
-                        "month": day_df["month"].iloc[0],
+                        "month": month_value,
                         "trade_day": trade_day,
                         "set_number": set_number,
                         "set_result": result,
+                        "raw_pnl_at_set_close": raw_running,
                         "set_outcome": outcome,
-                        "operations_used": ops_used,
-                        "start_operation": set_start_op,
-                        "end_operation": row["operation_id"],
+                        "legs_used": legs_used,
+                        "operations_touched": len(touched_ops),
+                        "start_operation": set_start_operation,
+                        "start_leg": set_start_leg,
+                        "end_operation": row.get("operation_id"),
+                        "end_leg": row.get("leg_index"),
                         "set_start_time": set_start_time,
-                        "set_end_time": row["sequence_started_at"],
+                        "set_end_time": row.get("event_time"),
                     }
                 )
                 set_number += 1
                 running = 0.0
-                ops_used = 0
-                set_start_op = None
-                set_start_time = None
+                raw_running = 0.0
+                legs_used = 0
+                touched_ops = set()
+                set_start_operation = None
+                set_start_leg = None
+                set_start_time = pd.NaT
 
-        if ops_used > 0:
+        if legs_used > 0:
+            month_value = day_df["month"].dropna().iloc[0] if "month" in day_df.columns and not day_df["month"].dropna().empty else ""
+            last = day_df.iloc[-1]
             rows.append(
                 {
-                    "month": day_df["month"].iloc[0],
+                    "month": month_value,
                     "trade_day": trade_day,
                     "set_number": set_number,
                     "set_result": running,
+                    "raw_pnl_at_set_close": raw_running,
                     "set_outcome": "End of day",
-                    "operations_used": ops_used,
-                    "start_operation": set_start_op,
-                    "end_operation": day_df.iloc[-1]["operation_id"],
+                    "legs_used": legs_used,
+                    "operations_touched": len(touched_ops),
+                    "start_operation": set_start_operation,
+                    "start_leg": set_start_leg,
+                    "end_operation": last.get("operation_id"),
+                    "end_leg": last.get("leg_index"),
                     "set_start_time": set_start_time,
-                    "set_end_time": day_df.iloc[-1]["sequence_started_at"],
+                    "set_end_time": last.get("event_time"),
                 }
             )
 
@@ -513,11 +590,82 @@ def simulate_daily_sets(ops_df: pd.DataFrame, set_target: float, set_loss: float
         "target_sets_pct": (sets["set_outcome"] == "Set target reached").mean() * 100 if not sets.empty else np.nan,
         "loss_sets_pct": (sets["set_outcome"] == "Set loss reached").mean() * 100 if not sets.empty else np.nan,
         "open_sets_pct": (sets["set_outcome"] == "End of day").mean() * 100 if not sets.empty else np.nan,
-        "avg_ops_per_set": sets["operations_used"].mean() if not sets.empty else np.nan,
+        "avg_legs_per_set": sets["legs_used"].mean() if not sets.empty else np.nan,
+        "avg_operations_per_set": sets["operations_touched"].mean() if not sets.empty else np.nan,
         "best_set": sets["set_result"].max() if not sets.empty else np.nan,
         "worst_set": sets["set_result"].min() if not sets.empty else np.nan,
     }
     return sets, metrics
+
+
+
+def calcular_resultado_simulado_por_cap_reversal(
+    op_row: pd.Series,
+    legs_df: pd.DataFrame,
+    max_reversal_permitido: int,
+) -> Dict[str, object]:
+    """Simula el resultado si la operación se hubiera cortado al máximo reversal permitido."""
+    real_pnl = float(op_row.get("sequence_net_pnl_currency", 0) or 0)
+    real_rev = int(op_row.get("reversal_count", 0) or 0)
+
+    if real_rev <= max_reversal_permitido:
+        return {
+            "reversal_count_simulado": real_rev,
+            "sequence_net_pnl_simulado": real_pnl,
+            "sequence_end_reason_simulado": op_row.get("sequence_end_reason", "Real result"),
+            "cap_aplicado": False,
+        }
+
+    operation_id = str(op_row.get("operation_id", ""))
+    legs_op = legs_df[legs_df["operation_id"].astype(str) == operation_id].copy() if not legs_df.empty else pd.DataFrame()
+
+    if legs_op.empty or "reversal_number" not in legs_op.columns:
+        return {
+            "reversal_count_simulado": max_reversal_permitido,
+            "sequence_net_pnl_simulado": real_pnl,
+            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}_SIN_LEGS",
+            "cap_aplicado": True,
+        }
+
+    legs_op = legs_op.sort_values("leg_index")
+    target_leg = legs_op[legs_op["reversal_number"].fillna(-1).astype(int) == int(max_reversal_permitido)].copy()
+
+    if target_leg.empty:
+        return {
+            "reversal_count_simulado": max_reversal_permitido,
+            "sequence_net_pnl_simulado": real_pnl,
+            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}_SIN_PIERNA",
+            "cap_aplicado": True,
+        }
+
+    last_leg = target_leg.sort_values("leg_index").iloc[-1]
+    pnl_sim = last_leg.get("cumulative_sequence_pnl_after_leg", np.nan)
+    if pd.isna(pnl_sim):
+        pnl_sim = real_pnl
+
+    exit_reason = last_leg.get("exit_reason", "")
+    if pd.isna(exit_reason) or str(exit_reason).strip() == "":
+        exit_reason = f"CAP_{max_reversal_permitido}"
+
+    return {
+        "reversal_count_simulado": max_reversal_permitido,
+        "sequence_net_pnl_simulado": float(pnl_sim),
+        "sequence_end_reason_simulado": str(exit_reason),
+        "cap_aplicado": True,
+    }
+
+
+def aplicar_cap_reversal(ops_df: pd.DataFrame, legs_df: pd.DataFrame, max_reversal_permitido: int) -> pd.DataFrame:
+    if ops_df.empty:
+        return pd.DataFrame()
+
+    base = ops_df.copy()
+    resultados = base.apply(
+        lambda row: calcular_resultado_simulado_por_cap_reversal(row, legs_df, max_reversal_permitido),
+        axis=1,
+    )
+    resultados_df = pd.DataFrame(resultados.tolist(), index=base.index)
+    return pd.concat([base, resultados_df], axis=1)
 
 
 # ============================================================
@@ -715,17 +863,17 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     show_conclusion("Tiempo y Sesiones", lines)
 
 
-def render_motor_reversiones(ops_df: pd.DataFrame):
+def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.header("Motor de Reversiones")
-    section_note("Esta página responde: ¿cuántas reversiones ayudan y cuándo empiezan a ser peligrosas?")
+    section_note("Esta página responde: ¿cuántas reversiones ayudan y qué habría pasado si limitamos el máximo permitido?")
     show_help(
         "Motor de Reversiones",
-        "Versión simple. Sin calidad por pierna, sin cap simulation y sin exposición por pierna.",
+        "Versión simple. Mantiene el dropdown importante de máximo reversal permitido, pero sin análisis confuso por pierna.",
         [
             "¿El PnL empeora cuando suben las reversiones?",
             "¿Qué cantidad de reversiones trae más drawdown?",
-            "¿La peor operación aparece con muchas reversiones?",
-            "¿Conviene limitar el bot antes de cierta profundidad?",
+            "¿Qué pasa si permito máximo 0, 1, 2, 3 o 4 reversals?",
+            "¿La reducción de riesgo vale más que el PnL que se pierde?",
         ],
     )
 
@@ -734,18 +882,66 @@ def render_motor_reversiones(ops_df: pd.DataFrame):
         return
 
     rev = aggregate_core(ops_df, ["reversal_count"]).sort_values("reversal_count")
-    st.subheader("Resultado por cantidad de reversals")
+    st.subheader("1. Resultado real por cantidad de reversals")
     st.dataframe(rev, use_container_width=True)
 
     if len(rev) > 0:
         fig, ax = plt.subplots(figsize=(9, 4))
         ax.bar(rev["reversal_count"].fillna(0).astype(int).astype(str), rev["pnl_total"])
         ax.set_title("PnL Total por Cantidad de Reversals")
-        ax.set_xlabel("Reversals")
+        ax.set_xlabel("Reversals usados")
         ax.set_ylabel("PnL")
         st.pyplot(fig)
 
-    st.subheader("Peores operaciones con reversals")
+    st.markdown("---")
+    st.subheader("2. Simulación simple por máximo reversal permitido")
+    section_note("Este es el dropdown importante: simula qué habría pasado si el bot no hubiera pasado de ese número máximo de reversals.")
+
+    max_real_rev = int(ops_df["reversal_count"].fillna(0).max()) if "reversal_count" in ops_df.columns else 0
+    max_reversal_permitido = st.selectbox(
+        "Máximo reversal permitido",
+        options=list(range(0, max_real_rev + 1)),
+        index=max_real_rev,
+        help="Ejemplo: si eliges 2, cualquier operación que llegó a reversal 3 o 4 se corta en el resultado acumulado después del reversal 2.",
+    )
+
+    sim_df = aplicar_cap_reversal(ops_df, legs_df, max_reversal_permitido)
+
+    real_pnl = ops_df["sequence_net_pnl_currency"].sum()
+    sim_pnl = sim_df["sequence_net_pnl_simulado"].sum()
+    ops_afectadas = int(sim_df["cap_aplicado"].sum()) if "cap_aplicado" in sim_df.columns else 0
+    peor_real = ops_df["sequence_net_pnl_currency"].min()
+    peor_sim = sim_df["sequence_net_pnl_simulado"].min()
+
+    c = st.columns(4)
+    with c[0]: card("PnL Real", fmt_money(real_pnl))
+    with c[1]: card("PnL Simulado", fmt_money(sim_pnl))
+    with c[2]: card("Operaciones Cortadas", str(ops_afectadas))
+    with c[3]: card("Peor Op Simulada", fmt_money(peor_sim))
+
+    cap_summary = pd.DataFrame([
+        {"métrica": "PnL total", "real": real_pnl, "simulado": sim_pnl, "diferencia": sim_pnl - real_pnl},
+        {"métrica": "Peor operación", "real": peor_real, "simulado": peor_sim, "diferencia": peor_sim - peor_real},
+        {"métrica": "Operaciones afectadas", "real": 0, "simulado": ops_afectadas, "diferencia": ops_afectadas},
+    ])
+    st.dataframe(cap_summary, use_container_width=True)
+
+    detail_cols = [
+        "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count", "reversal_count_simulado",
+        "sequence_net_pnl_currency", "sequence_net_pnl_simulado", "sequence_end_reason", "sequence_end_reason_simulado",
+        "operation_max_drawdown_currency", "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "config_key",
+    ]
+    detail_cols = [c for c in detail_cols if c in sim_df.columns]
+
+    st.markdown("**Operaciones donde el cap cambió el resultado**")
+    changed = sim_df[sim_df["cap_aplicado"] == True].copy()
+    if changed.empty:
+        st.info("Con este máximo reversal permitido no se cortó ninguna operación.")
+    else:
+        st.dataframe(changed[detail_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("3. Peores operaciones con reversals")
     dangerous = ops_df.sort_values(["reversal_count", "operation_max_drawdown_currency"], ascending=[False, False]).head(25)
     cols = [
         "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count",
@@ -759,18 +955,23 @@ def render_motor_reversiones(ops_df: pd.DataFrame):
         best = rev.sort_values("pnl_promedio", ascending=False).iloc[0]
         worst = rev.sort_values("pnl_promedio", ascending=True).iloc[0]
         risky = rev.sort_values("drawdown_promedio", ascending=False).iloc[0]
-        lines.append(f"Mejor PnL promedio: {int(best['reversal_count']) if pd.notna(best['reversal_count']) else 0} reversal(es).")
-        lines.append(f"Peor PnL promedio: {int(worst['reversal_count']) if pd.notna(worst['reversal_count']) else 0} reversal(es).")
-        lines.append(f"Mayor drawdown promedio: {int(risky['reversal_count']) if pd.notna(risky['reversal_count']) else 0} reversal(es).")
+        lines.append(f"Mejor PnL promedio real: {int(best['reversal_count']) if pd.notna(best['reversal_count']) else 0} reversal(es).")
+        lines.append(f"Peor PnL promedio real: {int(worst['reversal_count']) if pd.notna(worst['reversal_count']) else 0} reversal(es).")
+        lines.append(f"Mayor drawdown promedio real: {int(risky['reversal_count']) if pd.notna(risky['reversal_count']) else 0} reversal(es).")
+    lines.append(f"Con cap = {max_reversal_permitido}, el PnL cambia de {fmt_money(real_pnl)} a {fmt_money(sim_pnl)}.")
+    if peor_sim > peor_real:
+        lines.append("El cap mejora el peor caso; esto puede ser bueno para control de riesgo.")
+    elif peor_sim < peor_real:
+        lines.append("El cap empeora el peor caso en esta simulación; revisar antes de usarlo.")
     show_conclusion("Motor de Reversiones", lines)
 
 
-def render_simulador_diario(ops_df: pd.DataFrame):
+def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.header("Simulador Diario")
-    section_note("Esta página responde: ¿qué pasa si aplico una meta diaria y una pérdida diaria de forma clara?")
+    section_note("Esta página responde: ¿qué pasa si aplico una meta diaria y una pérdida diaria usando las piernas reales del bot, no solo el resultado final de la operación?")
     show_help(
         "Simulador Diario",
-        "Separado en dos bloques: stop diario clásico y sets diarios. Cada uno tiene su propia tabla clara.",
+        "Separado en dos bloques: stop diario clásico y sets diarios. Ambos consumen las piernas en orden cronológico, porque cada pierna es una entrada/salida real.",
         [
             "¿Cuántos días llegan a la meta antes que a la pérdida?",
             "¿Cuántos días terminan abiertos sin tocar meta/loss?",
@@ -779,17 +980,17 @@ def render_simulador_diario(ops_df: pd.DataFrame):
         ],
     )
 
-    if ops_df.empty:
-        st.warning("No hay operaciones con los filtros actuales.")
+    if ops_df.empty or legs_df.empty:
+        st.warning("No hay operaciones o piernas con los filtros actuales.")
         return
 
     st.subheader("1. Stop diario clásico")
-    section_note("El día se detiene completo cuando toca la meta o la pérdida. Si no toca ninguna, queda con el resultado acumulado hasta el final del día.")
+    section_note("El día se detiene completo cuando el PnL acumulado de las piernas cerradas toca la meta o la pérdida. Si no toca ninguna, queda con el resultado acumulado hasta el final del día.")
     c1, c2 = st.columns(2)
     daily_target = c1.number_input("Meta diaria", min_value=1.0, value=600.0, step=50.0, key="daily_target")
     daily_loss = c2.number_input("Pérdida máxima diaria", min_value=1.0, value=300.0, step=50.0, key="daily_loss")
 
-    daily_df, daily_m = simulate_daily_stop(ops_df, daily_target, daily_loss)
+    daily_df, daily_m = simulate_daily_stop(legs_df, daily_target, daily_loss)
     c = st.columns(4)
     with c[0]: card("PnL Simulado", fmt_money(daily_m.get("total_pnl", np.nan)))
     with c[1]: card("Días Meta", fmt_pct(daily_m.get("target_days_pct", np.nan)))
@@ -811,17 +1012,17 @@ def render_simulador_diario(ops_df: pd.DataFrame):
 
     st.markdown("---")
     st.subheader("2. Sets diarios")
-    section_note("El día se divide en sets. Cada set consume operaciones en orden hasta llegar al target o loss. Después, la siguiente operación empieza un nuevo set.")
+    section_note("El día se divide en sets. Cada set consume piernas reales en orden hasta llegar al target o loss. Después, la siguiente pierna empieza un nuevo set.")
     c1, c2 = st.columns(2)
     set_target = c1.number_input("Target por set", min_value=1.0, value=600.0, step=50.0, key="set_target")
     set_loss = c2.number_input("Loss por set", min_value=1.0, value=300.0, step=50.0, key="set_loss")
 
-    sets_df, sets_m = simulate_daily_sets(ops_df, set_target, set_loss)
+    sets_df, sets_m = simulate_daily_sets(legs_df, set_target, set_loss)
     c = st.columns(4)
     with c[0]: card("PnL Sets", fmt_money(sets_m.get("total_pnl", np.nan)))
     with c[1]: card("Sets Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
     with c[2]: card("Sets Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
-    with c[3]: card("Ops/Set Prom", "-" if pd.isna(sets_m.get("avg_ops_per_set", np.nan)) else f"{sets_m['avg_ops_per_set']:.2f}")
+    with c[3]: card("Piernas/Set Prom", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
 
     st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
 
@@ -832,7 +1033,8 @@ def render_simulador_diario(ops_df: pd.DataFrame):
         meta_pct=("set_outcome", lambda s: (s == "Set target reached").mean() * 100),
         perdida_pct=("set_outcome", lambda s: (s == "Set loss reached").mean() * 100),
         abierto_pct=("set_outcome", lambda s: (s == "End of day").mean() * 100),
-        ops_por_set=("operations_used", "mean"),
+        piernas_por_set=("legs_used", "mean"),
+        operaciones_por_set=("operations_touched", "mean"),
     )
     st.markdown("**Resumen mensual · Sets diarios**")
     st.dataframe(monthly_sets, use_container_width=True)
@@ -976,12 +1178,12 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     section_note("Esta página responde: ¿qué pasó exactamente dentro de una operación?")
     show_help(
         "Explorador de Operaciones",
-        "Detalle técnico por operación. Aquí sí vemos piernas, contratos, PnL acumulado y motivos de salida.",
+        "Detalle técnico por operación. Aquí sí vemos piernas, contratos, PnL acumulado y el resultado simulado con máximo reversal permitido.",
         [
             "¿Dónde entró y salió cada pierna?",
             "¿Cómo evolucionó el PnL acumulado?",
             "¿Cuántos contratos se usaron?",
-            "¿La recuperación fue sana o demasiado peligrosa?",
+            "¿Qué habría pasado con un máximo reversal diferente?",
         ],
     )
 
@@ -992,13 +1194,21 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     filtered = ops_df.copy()
 
     st.subheader("Filtros de búsqueda")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         search_id = st.text_input("Buscar operation_id", "")
     with c2:
         only_losers = st.checkbox("Solo operaciones perdedoras", value=False)
     with c3:
         min_reversal = st.number_input("Reversal mínimo", min_value=0, value=0, step=1)
+    with c4:
+        max_real_rev = int(filtered["reversal_count"].fillna(0).max()) if "reversal_count" in filtered.columns else 0
+        max_reversal_permitido = st.selectbox(
+            "Máximo reversal permitido",
+            options=list(range(0, max_real_rev + 1)),
+            index=max_real_rev,
+            key="explorer_max_reversal_permitido",
+        )
 
     if search_id.strip():
         filtered = filtered[filtered["operation_id"].astype(str).str.contains(search_id.strip(), case=False, na=False)]
@@ -1010,20 +1220,28 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones con esos filtros.")
         return
 
+    filtered_sim = aplicar_cap_reversal(filtered, legs_df, max_reversal_permitido)
+
+    c = st.columns(3)
+    with c[0]: card("PnL Real Visible", fmt_money(filtered_sim["sequence_net_pnl_currency"].sum()))
+    with c[1]: card("PnL Simulado Visible", fmt_money(filtered_sim["sequence_net_pnl_simulado"].sum()))
+    with c[2]: card("Ops Cortadas", str(int(filtered_sim["cap_aplicado"].sum())))
+
     list_cols = [
         "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
-        "operation_max_drawdown_currency", "operation_max_runup_currency", "reversal_count",
-        "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "config_key",
+        "sequence_net_pnl_simulado", "reversal_count", "reversal_count_simulado",
+        "operation_max_drawdown_currency", "operation_max_runup_currency",
+        "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "sequence_end_reason_simulado", "config_key",
     ]
-    list_cols = [c for c in list_cols if c in filtered.columns]
-    st.dataframe(filtered[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+    list_cols = [c for c in list_cols if c in filtered_sim.columns]
+    st.dataframe(filtered_sim[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
 
-    op_ids = filtered.sort_values("sequence_started_at", ascending=False)["operation_id"].astype(str).tolist()
+    op_ids = filtered_sim.sort_values("sequence_started_at", ascending=False)["operation_id"].astype(str).tolist()
     selected = st.selectbox("Seleccionar operación", op_ids)
     if not selected:
         return
 
-    op_row = filtered[filtered["operation_id"].astype(str) == selected]
+    op_row = filtered_sim[filtered_sim["operation_id"].astype(str) == selected]
     st.subheader("Resumen de la operación")
     st.dataframe(op_row, use_container_width=True)
 
@@ -1057,11 +1275,14 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
     row = op_row.iloc[0]
     lines = [
-        f"PnL final: {fmt_money(row['sequence_net_pnl_currency'])}.",
+        f"PnL real: {fmt_money(row['sequence_net_pnl_currency'])}.",
+        f"PnL simulado con cap {max_reversal_permitido}: {fmt_money(row['sequence_net_pnl_simulado'])}.",
         f"Reversals reales: {int(row['reversal_count']) if pd.notna(row['reversal_count']) else 0}.",
+        f"Reversals simulados: {int(row['reversal_count_simulado']) if pd.notna(row['reversal_count_simulado']) else 0}.",
         f"Drawdown máximo: {fmt_money(row['operation_max_drawdown_currency'])}.",
         f"Máximo contratos usados: {fmt_money(row['max_contracts_used'])}.",
-        f"Razón de cierre: {row['sequence_end_reason']}.",
+        f"Razón de cierre real: {row['sequence_end_reason']}.",
+        f"Razón de cierre simulada: {row['sequence_end_reason_simulado']}.",
     ]
     show_conclusion("Operación seleccionada", lines)
 
@@ -1111,9 +1332,9 @@ def main():
     elif page == "Tiempo y Sesiones":
         render_tiempo_y_sesiones(ops_filtered)
     elif page == "Motor de Reversiones":
-        render_motor_reversiones(ops_filtered)
+        render_motor_reversiones(ops_filtered, legs_filtered)
     elif page == "Simulador Diario":
-        render_simulador_diario(ops_filtered)
+        render_simulador_diario(ops_filtered, legs_filtered)
     elif page == "Laboratorio de Parámetros":
         render_laboratorio_parametros(ops_filtered)
     elif page == "Risk Killers":
