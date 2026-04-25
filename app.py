@@ -814,25 +814,13 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    m = overview_metrics(ops_df)
-    c = st.columns(4)
-    c[0].markdown(card("Operaciones", f"{m['ops']}"), unsafe_allow_html=True) if False else None
-    with c[0]: card("Operaciones", f"{m['ops']}")
-    with c[1]: card("Días", f"{m['days']}")
-    with c[2]: card("PnL Total", fmt_money(m["pnl"]))
-    with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
-
-    c = st.columns(4)
-    with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
-    with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
-    with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
-    with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
-
-    st.markdown("---")
-    st.subheader("Rachas de pérdida continua")
+    # ========================================================
+    # MAX LOST CONTINUE - visible at the TOP of the dashboard
+    # ========================================================
+    st.subheader("Max Lost Continue")
     section_note(
-        "Este es el dropdown de MAX que necesitabas: sirve para ver las peores rachas de pérdidas consecutivas. "
-        "Puedes analizarlo por operaciones completas o por piernas reales. Para riesgo diario, las piernas son la lectura más honesta."
+        "Este control está arriba porque es clave para riesgo: muestra las peores rachas de pérdidas consecutivas. "
+        "Por defecto usa piernas reales, porque cada pierna es una entrada/salida real."
     )
 
     c1, c2 = st.columns(2)
@@ -886,9 +874,28 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         )
 
     st.markdown("---")
+
+    # ========================================================
+    # MAIN HEALTH CARDS
+    # ========================================================
+    st.subheader("Salud General")
+    m = overview_metrics(ops_df)
+    c = st.columns(4)
+    with c[0]: card("Operaciones", f"{m['ops']}")
+    with c[1]: card("Días", f"{m['days']}")
+    with c[2]: card("PnL Total", fmt_money(m["pnl"]))
+    with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
+
+    c = st.columns(4)
+    with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
+    with c[1]: card("Días Positivos", fmt_pct(m["positive_days_rate"]))
+    with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
+    with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
+
+    st.markdown("---")
     st.subheader("Simulación rápida por máximo reversal permitido")
     section_note(
-        "Este control es importante: cambia el máximo reversal permitido y el dashboard recalcula el PnL como si el bot se hubiera detenido en ese reversal. "
+        "Este control cambia el máximo reversal permitido y recalcula el PnL como si el bot se hubiera detenido en ese reversal. "
         "El cálculo usa las piernas de la operación para tomar el PnL acumulado hasta el reversal seleccionado."
     )
 
@@ -940,59 +947,59 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             "sequence_net_pnl_currency", "sequence_net_pnl_simulado", "diferencia",
             "operation_max_drawdown_currency", "base_contracts", "sesion", "hora_inicio",
         ]
-        show_cols = [col for col in show_cols if col in changed_dashboard.columns]
-        st.markdown("**Operaciones afectadas por el dropdown**")
-        st.dataframe(
-            changed_dashboard[show_cols].sort_values("diferencia", ascending=False),
-            use_container_width=True,
-        )
-    else:
-        st.info("Con este máximo reversal permitido no se cambia ninguna operación.")
+        st.markdown("**Operaciones cambiadas por el máximo reversal permitido**")
+        st.dataframe(changed_dashboard[show_cols].sort_values("diferencia"), use_container_width=True)
 
     st.markdown("---")
-    st.subheader("Resultado mensual")
-    monthly = aggregate_core(ops_df, ["month"]).sort_values("month")
-    st.dataframe(monthly, use_container_width=True)
+    st.subheader("Resultado por Mes")
+    month_df = monthly_summary(ops_df)
+    st.dataframe(month_df, use_container_width=True)
 
-    if len(monthly) > 0:
+    if not month_df.empty:
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.bar(monthly["month"].astype(str), monthly["pnl_total"])
+        ax.bar(month_df["month"], month_df["pnl_total"])
         ax.set_title("PnL por Mes")
         ax.set_xlabel("Mes")
         ax.set_ylabel("PnL")
+        ax.tick_params(axis="x", rotation=25)
         st.pyplot(fig)
 
-    st.subheader("Resultado diario")
-    daily = ops_df.groupby(["month", "trade_day"], as_index=False).agg(
-        pnl_diario=("sequence_net_pnl_currency", "sum"),
-        operaciones=("operation_id", "count"),
-        peor_operacion=("sequence_net_pnl_currency", "min"),
-        mejor_operacion=("sequence_net_pnl_currency", "max"),
-        drawdown_max=("operation_max_drawdown_currency", "max"),
-        reversiones_promedio=("reversal_count", "mean"),
-    ).sort_values("trade_day")
-    st.dataframe(daily, use_container_width=True)
+    st.subheader("Resultado por Día")
+    daily = daily_summary(ops_df)
+    st.dataframe(daily.sort_values("trade_day", ascending=False), use_container_width=True)
 
-    fig, ax = plt.subplots(figsize=(11, 4))
-    ax.plot(daily["trade_day"].astype(str), daily["pnl_diario"], marker="o")
-    ax.set_title("PnL Diario")
-    ax.set_ylabel("PnL")
-    ax.tick_params(axis="x", rotation=45)
-    st.pyplot(fig)
+    if not daily.empty:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(daily["trade_day"].astype(str), daily["pnl_total"], marker="o")
+        ax.set_title("PnL Diario")
+        ax.set_ylabel("PnL")
+        ax.tick_params(axis="x", rotation=45)
+        st.pyplot(fig)
+
+    st.subheader("Mejores y Peores Días")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Peores días**")
+        st.dataframe(daily.sort_values("pnl_total", ascending=True).head(10), use_container_width=True)
+    with c2:
+        st.markdown("**Mejores días**")
+        st.dataframe(daily.sort_values("pnl_total", ascending=False).head(10), use_container_width=True)
 
     lines = []
-    lines.append("El bot está positivo en el rango filtrado." if m["pnl"] > 0 else "El bot está negativo en el rango filtrado.")
+    if m["pnl"] > 0:
+        lines.append("El bot está positivo con los filtros actuales.")
+    else:
+        lines.append("El bot está negativo con los filtros actuales.")
     if not pd.isna(m["profit_factor"]):
-        if m["profit_factor"] >= 1.40:
-            lines.append("El profit factor se ve saludable para seguir validando.")
+        if m["profit_factor"] >= 1.5:
+            lines.append("El profit factor está en una zona saludable.")
         elif m["profit_factor"] >= 1.0:
-            lines.append("El profit factor está apenas aceptable; conviene revisar riesgos y horarios.")
+            lines.append("El profit factor es positivo, pero todavía necesita control de riesgo.")
         else:
-            lines.append("El profit factor está débil; no confiaría todavía en esta configuración.")
+            lines.append("El profit factor está débil; hay que revisar filtros o reversals.")
     if abs(m["worst_op"]) > max(abs(m["avg_pnl"]) * 10, 1):
-        lines.append("La peor operación parece grande comparada con el promedio; revisa Risk Killers.")
+        lines.append("La peor operación es grande comparada con el promedio; revisar Risk Killers y Motor de Reversiones.")
     show_conclusion("Dashboard General", lines)
-
 
 def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     st.header("Tiempo y Sesiones")
