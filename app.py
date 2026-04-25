@@ -737,6 +737,107 @@ def build_consecutive_loss_streaks(df: pd.DataFrame, pnl_col: str, time_col: str
 
 
 # ============================================================
+
+
+def build_account_drawdown_from_legs(legs_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
+    """Build account-style max drawdown from real closed legs.
+
+    Max drawdown = biggest continuous drop in accumulated account PnL
+    from a previous equity high to the next equity low. This is measured
+    in dollars and is based on legs, not full operations.
+    """
+    legs = _prepare_leg_timeline(legs_df)
+    if legs.empty:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    legs = legs.copy().reset_index(drop=True)
+    legs["equity"] = legs["leg_pnl"].cumsum()
+
+    running_peak = []
+    peak = 0.0
+    for value in legs["equity"]:
+        peak = max(peak, float(value))
+        running_peak.append(peak)
+    legs["peak_equity"] = running_peak
+    legs["drawdown"] = legs["equity"] - legs["peak_equity"]
+
+    max_drawdown = float(legs["drawdown"].min())
+    ending_drawdown = float(legs["drawdown"].iloc[-1])
+
+    periods = []
+    peak = 0.0
+    peak_time = pd.NaT
+    in_dd = False
+    trough = 0.0
+    trough_time = pd.NaT
+    start_time = pd.NaT
+    touched_ops = set()
+    legs_count = 0
+
+    def close_period(recovered_time):
+        nonlocal in_dd, trough, trough_time, start_time, touched_ops, legs_count, peak, peak_time
+        if not in_dd:
+            return
+        periods.append({
+            "peak_time": peak_time if pd.notna(peak_time) else start_time,
+            "trough_time": trough_time,
+            "recovered_time": recovered_time,
+            "peak_equity": peak,
+            "trough_equity": trough,
+            "max_drawdown": trough - peak,
+            "legs_in_drawdown": legs_count,
+            "operations_touched": len(touched_ops),
+            "recovered": pd.notna(recovered_time),
+        })
+        in_dd = False
+        trough = peak
+        trough_time = pd.NaT
+        start_time = pd.NaT
+        touched_ops = set()
+        legs_count = 0
+
+    for _, row in legs.iterrows():
+        equity = float(row["equity"])
+        event_time = row.get("event_time")
+        op_id = row.get("operation_id")
+
+        if equity > peak:
+            close_period(event_time)
+            peak = equity
+            peak_time = event_time
+            continue
+
+        if equity < peak:
+            if not in_dd:
+                in_dd = True
+                start_time = event_time
+                trough = equity
+                trough_time = event_time
+                touched_ops = set()
+                legs_count = 0
+            legs_count += 1
+            if pd.notna(op_id):
+                touched_ops.add(op_id)
+            if equity < trough:
+                trough = equity
+                trough_time = event_time
+        elif equity >= peak and in_dd:
+            close_period(event_time)
+
+    close_period(pd.NaT)
+
+    dd_periods = pd.DataFrame(periods)
+    if not dd_periods.empty:
+        dd_periods = dd_periods.sort_values("max_drawdown", ascending=True)
+
+    metrics = {
+        "max_drawdown": max_drawdown,
+        "ending_drawdown": ending_drawdown,
+        "ending_equity": float(legs["equity"].iloc[-1]),
+        "peak_equity": float(legs["peak_equity"].max()),
+        "drawdown_periods": len(dd_periods),
+    }
+    return legs, dd_periods, metrics
 # FILTERS
 # ============================================================
 
@@ -815,18 +916,15 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         return
 
     # ========================================================
-    # MAIN HEALTH CARDS + MAX LOST CONTINUE DROPDOWN
+    # ========================================================
+    # ========================================================
+    # MAIN HEALTH CARDS + ACCOUNT MAX DRAWDOWN
     # ========================================================
     st.subheader("Salud General")
 
-    # Default risk calculation: by real legs, because every leg is a real entry/exit.
-    streak_df = build_consecutive_loss_streaks(
-        legs_df,
-        pnl_col="realized_pnl_currency",
-        time_col="exit_time",
-        id_col="operation_id",
-        unit_label="Pierna",
-    )
+    # Max Drawdown must be based on real closed legs, because those are the
+    # actual entries/exits that move the account equity.
+    equity_curve, dd_periods, dd_metrics = build_account_drawdown_from_legs(legs_df)
 
     m = overview_metrics(ops_df)
     c = st.columns(5)
@@ -834,14 +932,7 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     with c[1]: card("Días", f"{m['days']}")
     with c[2]: card("PnL Total", fmt_money(m["pnl"]))
     with c[3]: card("Profit Factor", "-" if pd.isna(m["profit_factor"]) else f"{m['profit_factor']:.2f}")
-    with c[4]:
-        max_loss_streak_rows = st.selectbox(
-            "Max Lost Continue",
-            options=[5, 10, 15, 25, 50, 100],
-            index=1,
-            key="dashboard_max_loss_streak_rows",
-            help="Cantidad máxima de rachas de pérdida continua que quieres mostrar abajo.",
-        )
+    with c[4]: card("Max Drawdown", fmt_money(dd_metrics.get("max_drawdown", np.nan)))
 
     c = st.columns(4)
     with c[0]: card("Win Rate", fmt_pct(m["win_rate"]))
@@ -849,30 +940,38 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
     with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
 
-    # Small risk summary directly under the health cards. No separate big top panel.
-    st.markdown("### Max Lost Continue")
+    st.markdown("### Max Drawdown del account")
     section_note(
-        "Basado en piernas reales: cada pierna cerrada suma o resta PnL. "
-        "El dropdown de arriba controla cuántas rachas se muestran en la tabla."
+        "Esto mide cuánto llegó a caer la cuenta desde un máximo anterior hasta el punto más bajo siguiente. "
+        "Se calcula con piernas reales cerradas, no con operaciones completas."
     )
 
-    if streak_df.empty:
-        st.info("No se encontraron rachas de pérdidas con los filtros actuales.")
+    if equity_curve.empty:
+        st.info("No hay piernas suficientes para calcular Max Drawdown.")
     else:
         c = st.columns(4)
-        with c[0]: card("Máx pérdidas seguidas", f"{int(streak_df['losses_in_a_row'].max())}")
-        with c[1]: card("Peor racha", fmt_money(streak_df["total_streak_loss"].min()))
-        with c[2]: card("Rachas encontradas", f"{len(streak_df)}")
-        with c[3]: card("Peor pérdida individual", fmt_money(streak_df["worst_single_loss"].min()))
+        with c[0]: card("Max Drawdown", fmt_money(dd_metrics.get("max_drawdown", np.nan)))
+        with c[1]: card("Equity Peak", fmt_money(dd_metrics.get("peak_equity", np.nan)))
+        with c[2]: card("Equity Final", fmt_money(dd_metrics.get("ending_equity", np.nan)))
+        with c[3]: card("Drawdown Actual", fmt_money(dd_metrics.get("ending_drawdown", np.nan)))
 
-        show_cols = [
-            "month", "trade_day_start", "start_time", "end_time", "unit",
-            "losses_in_a_row", "total_streak_loss", "worst_single_loss", "ids",
-        ]
-        st.dataframe(
-            streak_df[show_cols].head(int(max_loss_streak_rows)),
-            use_container_width=True,
-        )
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(equity_curve["event_time"], equity_curve["equity"])
+        ax.plot(equity_curve["event_time"], equity_curve["peak_equity"])
+        ax.set_title("Equity Curve basada en piernas cerradas")
+        ax.set_ylabel("PnL acumulado")
+        ax.tick_params(axis="x", rotation=35)
+        st.pyplot(fig)
+
+        if not dd_periods.empty:
+            st.markdown("**Peores caídas continuas de la cuenta**")
+            st.dataframe(
+                dd_periods[[
+                    "peak_time", "trough_time", "recovered_time", "peak_equity", "trough_equity",
+                    "max_drawdown", "legs_in_drawdown", "operations_touched", "recovered",
+                ]].head(10),
+                use_container_width=True,
+            )
 
     st.markdown("---")
     st.subheader("Simulación rápida por máximo reversal permitido")
