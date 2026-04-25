@@ -2,6 +2,7 @@ import json
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -66,6 +67,41 @@ def card(title: str, value: str):
 
 def section_note(text: str):
     st.markdown(f"<div class='section-note'>{text}</div>", unsafe_allow_html=True)
+
+
+
+def format_date_axis(ax, min_ticks: int = 5, max_ticks: int = 9, rotation: int = 25):
+    """Keep date charts readable when many days/months are loaded."""
+    locator = mdates.AutoDateLocator(minticks=min_ticks, maxticks=max_ticks)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.tick_params(axis="x", rotation=rotation)
+
+
+def render_clean_daily_pnl_chart(daily_df: pd.DataFrame):
+    """Daily PnL is clearer as bars, using real dates instead of text labels."""
+    if daily_df.empty:
+        st.info("No hay datos diarios para mostrar.")
+        return
+
+    chart_df = daily_df.copy()
+    chart_df["trade_day"] = pd.to_datetime(chart_df["trade_day"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["trade_day"]).sort_values("trade_day")
+
+    if chart_df.empty:
+        st.info("No hay fechas válidas para mostrar en el gráfico diario.")
+        return
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.bar(chart_df["trade_day"], chart_df["pnl_total"], width=0.8)
+    ax.axhline(0, linewidth=1)
+    ax.set_title("Resultado diario")
+    ax.set_ylabel("PnL")
+    ax.set_xlabel("Fecha")
+    format_date_axis(ax, min_ticks=5, max_ticks=10, rotation=25)
+    fig.tight_layout()
+    st.pyplot(fig)
 
 
 def show_help(title: str, description: str, questions: List[str]):
@@ -991,7 +1027,7 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         with c[2]: card("Cuenta Final", fmt_money(dd_metrics.get("ending_equity", np.nan)))
         with c[3]: card("Caída Actual", fmt_money(dd_metrics.get("ending_drawdown", np.nan)))
 
-        fig, ax = plt.subplots(figsize=(10, 4))
+        fig, ax = plt.subplots(figsize=(11, 4))
         ax.plot(equity_curve["event_time"], equity_curve["equity"], label="Cuenta actual")
         ax.plot(equity_curve["event_time"], equity_curve["peak_equity"], label="Mejor punto alcanzado")
         ax.fill_between(
@@ -1001,10 +1037,12 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             where=equity_curve["equity"] < equity_curve["peak_equity"],
             alpha=0.15,
         )
-        ax.set_title("Cuenta vs mejor punto alcanzado")
+        ax.set_title("Cuenta actual vs mejor punto alcanzado")
         ax.set_ylabel("Ganancia acumulada")
+        ax.set_xlabel("Fecha")
         ax.legend(loc="best")
-        ax.tick_params(axis="x", rotation=35)
+        format_date_axis(ax, min_ticks=5, max_ticks=9, rotation=25)
+        fig.tight_layout()
         st.pyplot(fig)
 
         if not dd_periods.empty:
@@ -1087,6 +1125,7 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         ax.set_xlabel("Mes")
         ax.set_ylabel("PnL")
         ax.tick_params(axis="x", rotation=25)
+        fig.tight_layout()
         st.pyplot(fig)
 
     st.subheader("Resultado por Día")
@@ -1094,12 +1133,7 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.dataframe(daily.sort_values("trade_day", ascending=False), use_container_width=True)
 
     if not daily.empty:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(daily["trade_day"].astype(str), daily["pnl_total"], marker="o")
-        ax.set_title("PnL Diario")
-        ax.set_ylabel("PnL")
-        ax.tick_params(axis="x", rotation=45)
-        st.pyplot(fig)
+        render_clean_daily_pnl_chart(daily)
 
     st.subheader("Mejores y Peores Días")
     c1, c2 = st.columns(2)
