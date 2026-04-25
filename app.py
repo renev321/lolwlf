@@ -728,7 +728,7 @@ def apply_global_filters(ops_df: pd.DataFrame, legs_df: pd.DataFrame) -> Tuple[p
 # ============================================================
 
 
-def render_dashboard_general(ops_df: pd.DataFrame):
+def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.header("Dashboard General")
     section_note("Esta página responde: ¿el bot está sano, estable y consistente por mes y por día?")
     show_help(
@@ -760,6 +760,71 @@ def render_dashboard_general(ops_df: pd.DataFrame):
     with c[2]: card("Peor Operación", fmt_money(m["worst_op"]))
     with c[3]: card("Peor Día", fmt_money(m["worst_day"]))
 
+    st.markdown("---")
+    st.subheader("Simulación rápida por máximo reversal permitido")
+    section_note(
+        "Este control es importante: cambia el máximo reversal permitido y el dashboard recalcula el PnL como si el bot se hubiera detenido en ese reversal. "
+        "El cálculo usa las piernas de la operación para tomar el PnL acumulado hasta el reversal seleccionado."
+    )
+
+    max_real_rev = int(ops_df["reversal_count"].fillna(0).max()) if "reversal_count" in ops_df.columns and not ops_df.empty else 0
+    dashboard_max_reversal = st.selectbox(
+        "Máximo reversal permitido",
+        options=list(range(0, max_real_rev + 1)),
+        index=max_real_rev,
+        key="dashboard_max_reversal_permitido",
+        help="Ejemplo: si eliges 2, las operaciones que llegaron a reversal 3 o más se simulan cortadas después del reversal 2.",
+    )
+
+    dashboard_sim = aplicar_cap_reversal(ops_df, legs_df, dashboard_max_reversal)
+    real_pnl = ops_df["sequence_net_pnl_currency"].sum()
+    sim_pnl = dashboard_sim["sequence_net_pnl_simulado"].sum()
+    pnl_diff = sim_pnl - real_pnl
+    affected_ops = int(dashboard_sim["cap_aplicado"].sum()) if "cap_aplicado" in dashboard_sim.columns else 0
+    worst_sim = dashboard_sim["sequence_net_pnl_simulado"].min() if "sequence_net_pnl_simulado" in dashboard_sim.columns else np.nan
+
+    c = st.columns(4)
+    with c[0]: card("PnL Real", fmt_money(real_pnl))
+    with c[1]: card("PnL con Max Reversal", fmt_money(sim_pnl))
+    with c[2]: card("Diferencia", fmt_money(pnl_diff))
+    with c[3]: card("Ops Afectadas", str(affected_ops))
+
+    c = st.columns(4)
+    with c[0]: card("Peor Op Real", fmt_money(m["worst_op"]))
+    with c[1]: card("Peor Op Simulada", fmt_money(worst_sim))
+    with c[2]: card("Max Reversal Real", str(max_real_rev))
+    with c[3]: card("Max Reversal Usado", str(dashboard_max_reversal))
+
+    sim_month = dashboard_sim.groupby("month", as_index=False).agg(
+        pnl_real=("sequence_net_pnl_currency", "sum"),
+        pnl_simulado=("sequence_net_pnl_simulado", "sum"),
+        operaciones=("operation_id", "count"),
+        operaciones_afectadas=("cap_aplicado", "sum"),
+    ) if "month" in dashboard_sim.columns and not dashboard_sim.empty else pd.DataFrame()
+    if not sim_month.empty:
+        sim_month["diferencia"] = sim_month["pnl_simulado"] - sim_month["pnl_real"]
+        st.markdown("**Impacto mensual del máximo reversal permitido**")
+        st.dataframe(sim_month.sort_values("month"), use_container_width=True)
+
+    changed_dashboard = dashboard_sim[dashboard_sim["cap_aplicado"] == True].copy() if "cap_aplicado" in dashboard_sim.columns else pd.DataFrame()
+    if not changed_dashboard.empty:
+        changed_dashboard["diferencia"] = changed_dashboard["sequence_net_pnl_simulado"] - changed_dashboard["sequence_net_pnl_currency"]
+        show_cols = [
+            "month", "trade_day", "operation_id", "sequence_started_at",
+            "reversal_count", "reversal_count_simulado",
+            "sequence_net_pnl_currency", "sequence_net_pnl_simulado", "diferencia",
+            "operation_max_drawdown_currency", "base_contracts", "sesion", "hora_inicio",
+        ]
+        show_cols = [col for col in show_cols if col in changed_dashboard.columns]
+        st.markdown("**Operaciones afectadas por el dropdown**")
+        st.dataframe(
+            changed_dashboard[show_cols].sort_values("diferencia", ascending=False),
+            use_container_width=True,
+        )
+    else:
+        st.info("Con este máximo reversal permitido no se cambia ninguna operación.")
+
+    st.markdown("---")
     st.subheader("Resultado mensual")
     monthly = aggregate_core(ops_df, ["month"]).sort_values("month")
     st.dataframe(monthly, use_container_width=True)
@@ -1328,7 +1393,7 @@ def main():
     )
 
     if page == "Dashboard General":
-        render_dashboard_general(ops_filtered)
+        render_dashboard_general(ops_filtered, legs_filtered)
     elif page == "Tiempo y Sesiones":
         render_tiempo_y_sesiones(ops_filtered)
     elif page == "Motor de Reversiones":
