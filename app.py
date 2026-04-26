@@ -167,6 +167,179 @@ def render_clean_daily_pnl_chart(daily_df: pd.DataFrame):
     st.pyplot(fig)
 
 
+
+
+def render_monthly_result_chart(month_df: pd.DataFrame):
+    """Interactive month result chart used in Dashboard General."""
+    if month_df.empty or "month" not in month_df.columns or "pnl_total" not in month_df.columns:
+        st.info("No hay datos mensuales para mostrar.")
+        return
+
+    chart_df = month_df.copy().sort_values("month")
+    chart_df["resultado"] = np.where(chart_df["pnl_total"] >= 0, "Mes ganador", "Mes perdedor")
+
+    custom_cols = ["month", "resultado"]
+    hover_lines = [
+        "<b>Mes:</b> %{customdata[0]}",
+        "<b>Resultado:</b> %{customdata[1]}",
+        "<b>PnL:</b> $%{y:,.2f}",
+    ]
+
+    optional_cols = [
+        ("operaciones", "Operaciones", "int"),
+        ("profit_factor", "Profit factor", "num"),
+        ("tasa_acierto", "Win rate", "pct"),
+        ("pnl_promedio", "PnL promedio", "money"),
+        ("peor_operacion", "Peor operación", "money"),
+        ("mejor_operacion", "Mejor operación", "money"),
+        ("drawdown_max", "Mayor drawdown", "money"),
+        ("reversiones_promedio", "Reversals promedio", "num"),
+        ("contratos_max", "Máx contratos", "num"),
+    ]
+
+    for col, label, kind in optional_cols:
+        if col in chart_df.columns:
+            custom_cols.append(col)
+            idx = len(custom_cols) - 1
+            if kind == "pct":
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.1f}}%")
+            elif kind == "money":
+                hover_lines.append(f"<b>{label}:</b> $%{{customdata[{idx}]:,.2f}}")
+            elif kind == "int":
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.0f}}")
+            else:
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.2f}}")
+
+    if go is not None:
+        colors = np.where(chart_df["pnl_total"] >= 0, "#2E86C1", "#C0392B")
+        fig = go.Figure()
+        fig.add_bar(
+            x=chart_df["month"],
+            y=chart_df["pnl_total"],
+            customdata=chart_df[custom_cols].to_numpy(),
+            hovertemplate="<br>".join(hover_lines) + "<extra></extra>",
+            marker_color=colors,
+            name="PnL mensual",
+        )
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title="Resultado por mes",
+            xaxis_title="Mes",
+            yaxis_title="PnL",
+            hovermode="closest",
+            height=420,
+            margin=dict(l=40, r=25, t=55, b=45),
+        )
+        fig.update_xaxes(type="category")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    st.warning("Plotly no está instalado. El gráfico será estático y no tendrá hover.")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(chart_df["month"].astype(str), chart_df["pnl_total"])
+    ax.axhline(0, linewidth=1)
+    ax.set_title("Resultado por mes")
+    ax.set_xlabel("Mes")
+    ax.set_ylabel("PnL")
+    ax.tick_params(axis="x", rotation=25)
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+def render_reversal_month_impact_chart(sim_month: pd.DataFrame, selected_reversal: int):
+    """Interactive monthly comparison: real PnL vs selected reversal PnL."""
+    needed = {"month", "pnl_real", "pnl_reversal_seleccionado"}
+    if sim_month.empty or not needed.issubset(set(sim_month.columns)):
+        return
+
+    chart_df = sim_month.copy().sort_values("month")
+
+    custom_cols = [
+        "month",
+        "diferencia_pnl",
+        "profit_factor_real",
+        "profit_factor_reversal_seleccionado",
+        "max_drawdown_real",
+        "max_drawdown_reversal_seleccionado",
+        "operaciones_cortadas",
+        "resultados_cambiados",
+        "operaciones",
+    ]
+    custom_cols = [c for c in custom_cols if c in chart_df.columns]
+
+    if go is not None:
+        fig = go.Figure()
+        fig.add_bar(
+            x=chart_df["month"],
+            y=chart_df["pnl_real"],
+            name="Real",
+            customdata=chart_df[custom_cols].to_numpy(),
+            hovertemplate=(
+                "<b>Mes:</b> %{customdata[0]}<br>"
+                "<b>Tipo:</b> Real<br>"
+                "<b>PnL real:</b> $%{y:,.2f}<br>"
+                "<b>Diferencia si se corta:</b> $%{customdata[1]:,.2f}<br>"
+                "<b>PF real:</b> %{customdata[2]:.2f}<br>"
+                "<b>PF seleccionado:</b> %{customdata[3]:.2f}<br>"
+                "<b>Caída máx real:</b> $%{customdata[4]:,.2f}<br>"
+                "<b>Caída máx seleccionado:</b> $%{customdata[5]:,.2f}<br>"
+                "<b>Ops cortadas:</b> %{customdata[6]:.0f}<br>"
+                "<b>Resultados cambiados:</b> %{customdata[7]:.0f}<br>"
+                "<b>Operaciones:</b> %{customdata[8]:.0f}"
+                "<extra></extra>"
+            ),
+        )
+        fig.add_bar(
+            x=chart_df["month"],
+            y=chart_df["pnl_reversal_seleccionado"],
+            name=f"Reversal {selected_reversal}",
+            customdata=chart_df[custom_cols].to_numpy(),
+            hovertemplate=(
+                "<b>Mes:</b> %{customdata[0]}<br>"
+                f"<b>Tipo:</b> Reversal {selected_reversal}<br>"
+                "<b>PnL con reversal seleccionado:</b> $%{y:,.2f}<br>"
+                "<b>Diferencia vs real:</b> $%{customdata[1]:,.2f}<br>"
+                "<b>PF real:</b> %{customdata[2]:.2f}<br>"
+                "<b>PF seleccionado:</b> %{customdata[3]:.2f}<br>"
+                "<b>Caída máx real:</b> $%{customdata[4]:,.2f}<br>"
+                "<b>Caída máx seleccionado:</b> $%{customdata[5]:,.2f}<br>"
+                "<b>Ops cortadas:</b> %{customdata[6]:.0f}<br>"
+                "<b>Resultados cambiados:</b> %{customdata[7]:.0f}<br>"
+                "<b>Operaciones:</b> %{customdata[8]:.0f}"
+                "<extra></extra>"
+            ),
+        )
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title=f"Impacto mensual si el bot se detiene en reversal {selected_reversal}",
+            xaxis_title="Mes",
+            yaxis_title="PnL",
+            barmode="group",
+            hovermode="closest",
+            height=430,
+            margin=dict(l=40, r=25, t=55, b=45),
+        )
+        fig.update_xaxes(type="category")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    st.warning("Plotly no está instalado. El gráfico será estático y no tendrá hover.")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    x = np.arange(len(chart_df))
+    width = 0.38
+    ax.bar(x - width / 2, chart_df["pnl_real"], width, label="Real")
+    ax.bar(x + width / 2, chart_df["pnl_reversal_seleccionado"], width, label=f"Reversal {selected_reversal}")
+    ax.axhline(0, linewidth=1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(chart_df["month"].astype(str), rotation=25)
+    ax.set_title(f"Impacto mensual si el bot se detiene en reversal {selected_reversal}")
+    ax.set_xlabel("Mes")
+    ax.set_ylabel("PnL")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
 def show_help(title: str, description: str, questions: List[str]):
     with st.expander(f"¿Para qué sirve esta página? · {title}", expanded=False):
         st.markdown(description)
@@ -1371,7 +1544,13 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     sim_month = monthly_simulated_reversal_summary(dashboard_sim)
     if not sim_month.empty:
         st.markdown("**Impacto mensual del reversal seleccionado**")
-        st.dataframe(sim_month, use_container_width=True)
+        section_note(
+            "Compara el resultado real contra lo que habría pasado si el bot se detenía en el reversal seleccionado. "
+            "Pasa el mouse sobre las barras para ver PnL, profit factor, caída máxima y operaciones cortadas."
+        )
+        render_reversal_month_impact_chart(sim_month, dashboard_max_reversal)
+        with st.expander("Ver tabla mensual detallada", expanded=False):
+            st.dataframe(sim_month, use_container_width=True)
 
     changed_dashboard = dashboard_sim[dashboard_sim["cap_aplicado"] == True].copy() if "cap_aplicado" in dashboard_sim.columns else pd.DataFrame()
     if not changed_dashboard.empty:
@@ -1389,17 +1568,12 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.markdown("---")
     st.subheader("Resultado por Mes")
     month_df = monthly_summary(ops_df)
-    st.dataframe(month_df, use_container_width=True)
-
     if not month_df.empty:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.bar(month_df["month"], month_df["pnl_total"])
-        ax.set_title("PnL por Mes")
-        ax.set_xlabel("Mes")
-        ax.set_ylabel("PnL")
-        ax.tick_params(axis="x", rotation=25)
-        fig.tight_layout()
-        st.pyplot(fig)
+        render_monthly_result_chart(month_df)
+        with st.expander("Ver tabla mensual detallada", expanded=False):
+            st.dataframe(month_df, use_container_width=True)
+    else:
+        st.info("No hay datos mensuales para mostrar.")
 
     st.subheader("Resultado por Día")
     daily = daily_summary(ops_df)
