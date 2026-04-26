@@ -7,6 +7,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+try:
+    import plotly.graph_objects as go
+except Exception:
+    go = None
+
 
 # ============================================================
 # CONFIG / STYLE
@@ -80,7 +85,7 @@ def format_date_axis(ax, min_ticks: int = 5, max_ticks: int = 9, rotation: int =
 
 
 def render_clean_daily_pnl_chart(daily_df: pd.DataFrame):
-    """Daily PnL is clearer as bars, using real dates instead of text labels."""
+    """Interactive daily PnL chart with simple hover details."""
     if daily_df.empty:
         st.info("No hay datos diarios para mostrar.")
         return
@@ -93,6 +98,62 @@ def render_clean_daily_pnl_chart(daily_df: pd.DataFrame):
         st.info("No hay fechas válidas para mostrar en el gráfico diario.")
         return
 
+    chart_df["fecha"] = chart_df["trade_day"].dt.strftime("%Y-%m-%d")
+    chart_df["resultado"] = np.where(chart_df["pnl_total"] >= 0, "Ganador", "Perdedor")
+
+    hover_parts = [
+        "<b>Día:</b> %{customdata[0]}",
+        "<b>Resultado:</b> %{customdata[1]}",
+        "<b>PnL:</b> $%{y:,.2f}",
+    ]
+
+    optional_cols = [
+        ("operaciones", "Operaciones"),
+        ("tasa_acierto", "Win rate"),
+        ("peor_operacion", "Peor operación"),
+        ("mejor_operacion", "Mejor operación"),
+        ("reversiones_promedio", "Reversals prom."),
+    ]
+
+    custom_cols = ["fecha", "resultado"]
+    for col, label in optional_cols:
+        if col in chart_df.columns:
+            custom_cols.append(col)
+            idx = len(custom_cols) - 1
+            if col == "tasa_acierto":
+                hover_parts.append(f"<b>{label}:</b> %{{customdata[{idx}]:.1f}}%")
+            elif col in ["peor_operacion", "mejor_operacion"]:
+                hover_parts.append(f"<b>{label}:</b> $%{{customdata[{idx}]:,.2f}}")
+            else:
+                hover_parts.append(f"<b>{label}:</b> %{{customdata[{idx}]}}")
+
+    hover_template = "<br>".join(hover_parts) + "<extra></extra>"
+
+    if go is not None:
+        bar_colors = np.where(chart_df["pnl_total"] >= 0, "#2E86C1", "#C0392B")
+        fig = go.Figure()
+        fig.add_bar(
+            x=chart_df["trade_day"],
+            y=chart_df["pnl_total"],
+            customdata=chart_df[custom_cols].to_numpy(),
+            hovertemplate=hover_template,
+            marker_color=bar_colors,
+            name="Resultado diario",
+        )
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title="Resultado diario",
+            xaxis_title="Fecha",
+            yaxis_title="PnL",
+            hovermode="x unified",
+            height=420,
+            margin=dict(l=40, r=25, t=55, b=40),
+        )
+        fig.update_xaxes(nticks=10, tickformat="%b %d")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # Fallback if Plotly is not available. This is static, but still keeps dates clean.
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.bar(chart_df["trade_day"], chart_df["pnl_total"], width=0.8)
     ax.axhline(0, linewidth=1)
@@ -1027,23 +1088,69 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         with c[2]: card("Cuenta Final", fmt_money(dd_metrics.get("ending_equity", np.nan)))
         with c[3]: card("Caída Actual", fmt_money(dd_metrics.get("ending_drawdown", np.nan)))
 
-        fig, ax = plt.subplots(figsize=(11, 4))
-        ax.plot(equity_curve["event_time"], equity_curve["equity"], label="Cuenta actual")
-        ax.plot(equity_curve["event_time"], equity_curve["peak_equity"], label="Mejor punto alcanzado")
-        ax.fill_between(
-            equity_curve["event_time"],
-            equity_curve["equity"],
-            equity_curve["peak_equity"],
-            where=equity_curve["equity"] < equity_curve["peak_equity"],
-            alpha=0.15,
-        )
-        ax.set_title("Cuenta actual vs mejor punto alcanzado")
-        ax.set_ylabel("Ganancia acumulada")
-        ax.set_xlabel("Fecha")
-        ax.legend(loc="best")
-        format_date_axis(ax, min_ticks=5, max_ticks=9, rotation=25)
-        fig.tight_layout()
-        st.pyplot(fig)
+        curve = equity_curve.copy()
+        curve["event_time"] = pd.to_datetime(curve["event_time"], errors="coerce")
+        curve = curve.dropna(subset=["event_time"]).sort_values("event_time")
+        curve["fecha"] = curve["event_time"].dt.strftime("%Y-%m-%d %H:%M")
+        curve["caida"] = curve["equity"] - curve["peak_equity"]
+
+        if go is not None and not curve.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=curve["event_time"],
+                y=curve["peak_equity"],
+                mode="lines",
+                name="Mejor punto alcanzado",
+                customdata=curve[["fecha", "peak_equity"]].to_numpy(),
+                hovertemplate=(
+                    "<b>Fecha:</b> %{customdata[0]}<br>"
+                    "<b>Mejor punto:</b> $%{customdata[1]:,.2f}"
+                    "<extra></extra>"
+                ),
+            ))
+            fig.add_trace(go.Scatter(
+                x=curve["event_time"],
+                y=curve["equity"],
+                mode="lines",
+                name="Cuenta actual",
+                fill="tonexty",
+                customdata=curve[["fecha", "equity", "peak_equity", "caida"]].to_numpy(),
+                hovertemplate=(
+                    "<b>Fecha:</b> %{customdata[0]}<br>"
+                    "<b>Cuenta actual:</b> $%{customdata[1]:,.2f}<br>"
+                    "<b>Mejor punto:</b> $%{customdata[2]:,.2f}<br>"
+                    "<b>Caída desde mejor punto:</b> $%{customdata[3]:,.2f}"
+                    "<extra></extra>"
+                ),
+            ))
+            fig.update_layout(
+                title="Cuenta actual vs mejor punto alcanzado",
+                xaxis_title="Fecha",
+                yaxis_title="Ganancia acumulada",
+                hovermode="x unified",
+                height=420,
+                margin=dict(l=40, r=25, t=55, b=40),
+            )
+            fig.update_xaxes(nticks=10, tickformat="%b %d")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            fig, ax = plt.subplots(figsize=(11, 4))
+            ax.plot(curve["event_time"], curve["equity"], label="Cuenta actual")
+            ax.plot(curve["event_time"], curve["peak_equity"], label="Mejor punto alcanzado")
+            ax.fill_between(
+                curve["event_time"],
+                curve["equity"],
+                curve["peak_equity"],
+                where=curve["equity"] < curve["peak_equity"],
+                alpha=0.15,
+            )
+            ax.set_title("Cuenta actual vs mejor punto alcanzado")
+            ax.set_ylabel("Ganancia acumulada")
+            ax.set_xlabel("Fecha")
+            ax.legend(loc="best")
+            format_date_axis(ax, min_ticks=5, max_ticks=9, rotation=25)
+            fig.tight_layout()
+            st.pyplot(fig)
 
         if not dd_periods.empty:
             st.markdown("**Peores momentos donde la cuenta cayó**")
