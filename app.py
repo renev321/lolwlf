@@ -3010,69 +3010,298 @@ def render_laboratorio_parametros(ops_df: pd.DataFrame):
 
 def render_risk_killers(ops_df: pd.DataFrame):
     st.header("Risk Killers")
-    section_note("Esta página responde: ¿qué cosas están dañando el bot más rápido?")
-    show_help(
-        "Risk Killers",
-        "Lista práctica de los riesgos que conviene revisar primero.",
-        [
-            "¿Cuáles son las peores operaciones?",
-            "¿Qué días dañan el resultado?",
-            "¿Hay ganadoras con drawdown demasiado feo?",
-            "¿Qué horas o sesiones son más peligrosas?",
-        ],
-    )
+    section_note("Esta página responde: ¿qué está dañando el bot y qué conviene revisar primero?")
 
     if ops_df.empty:
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    cols = [
-        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
-        "operation_max_drawdown_currency", "reversal_count", "base_contracts", "max_contracts_used",
-        "sesion", "hora_inicio", "sequence_end_reason", "config_key",
-    ]
-    cols = [c for c in cols if c in ops_df.columns]
+    work = ops_df.copy()
+    work["pnl"] = pd.to_numeric(work["sequence_net_pnl_currency"], errors="coerce").fillna(0.0)
+    work["drawdown"] = pd.to_numeric(work.get("operation_max_drawdown_currency", 0), errors="coerce").fillna(0.0)
+    work["contracts"] = pd.to_numeric(work.get("max_contracts_used", np.nan), errors="coerce")
+    work["reversal_count"] = pd.to_numeric(work.get("reversal_count", 0), errors="coerce").fillna(0)
 
-    st.subheader("Peores operaciones")
-    worst_ops = ops_df.sort_values("sequence_net_pnl_currency", ascending=True).head(25)
-    st.dataframe(worst_ops[cols], use_container_width=True)
+    losers = work[work["pnl"] < 0].copy()
+    winners = work[work["pnl"] > 0].copy()
+    total_loss = abs(losers["pnl"].sum()) if not losers.empty else 0.0
+    top_5_loss = abs(losers.sort_values("pnl").head(5)["pnl"].sum()) if not losers.empty else 0.0
+    concentration = safe_div(top_5_loss, total_loss) * 100 if total_loss > 0 else np.nan
 
-    st.subheader("Peores días")
-    worst_days = ops_df.groupby(["month", "trade_day"], as_index=False).agg(
-        pnl_dia=("sequence_net_pnl_currency", "sum"),
+    daily_risk = work.groupby(["month", "trade_day"], as_index=False).agg(
+        pnl_dia=("pnl", "sum"),
         operaciones=("operation_id", "count"),
-        peor_operacion=("sequence_net_pnl_currency", "min"),
-        drawdown_max=("operation_max_drawdown_currency", "max"),
+        peor_operacion=("pnl", "min"),
+        mejor_operacion=("pnl", "max"),
+        drawdown_max=("drawdown", "max"),
         reversiones_promedio=("reversal_count", "mean"),
-        contratos_max=("max_contracts_used", "max"),
-    ).sort_values("pnl_dia", ascending=True).head(25)
-    st.dataframe(worst_days, use_container_width=True)
+        contratos_max=("contracts", "max"),
+    )
 
-    st.subheader("Ganadoras peligrosas")
-    section_note("Operaciones que cerraron positivas, pero sufrieron mucho drawdown. Estas pueden verse bien en PnL, pero ser malas para operar en vivo.")
-    winners_bad_dd = ops_df[ops_df["sequence_net_pnl_currency"] > 0].sort_values("operation_max_drawdown_currency", ascending=False).head(25)
-    st.dataframe(winners_bad_dd[cols], use_container_width=True)
+    worst_op = work.sort_values("pnl").iloc[0] if not work.empty else None
+    worst_day = daily_risk.sort_values("pnl_dia").iloc[0] if not daily_risk.empty else None
+    bad_winner_threshold = winners["drawdown"].quantile(0.75) if not winners.empty else np.nan
+    dangerous_winners = winners[winners["drawdown"] >= bad_winner_threshold].copy() if pd.notna(bad_winner_threshold) else pd.DataFrame()
 
+    st.subheader("1. Resumen visual del riesgo")
+    c = st.columns(4)
+    with c[0]:
+        card("Peor operación", fmt_money(worst_op["pnl"]) if worst_op is not None else "-")
+    with c[1]:
+        card("Peor día", fmt_money(worst_day["pnl_dia"]) if worst_day is not None else "-")
+    with c[2]:
+        card("Pérdida total", fmt_money(-total_loss))
+    with c[3]:
+        card("Top 5 pérdidas", "-" if pd.isna(concentration) else f"{concentration:.1f}%")
+
+    section_note(
+        "Top 5 pérdidas indica qué porcentaje de toda la pérdida viene de solo las 5 peores operaciones. "
+        "Si este número es alto, el problema principal puede ser controlar pocos eventos grandes, no cambiar todo el bot."
+    )
+
+    st.subheader("2. Peores operaciones")
+    top_n = st.slider("Cantidad de operaciones a mostrar", min_value=5, max_value=50, value=15, step=5, key="risk_top_n")
+    worst_ops = work.sort_values("pnl", ascending=True).head(top_n).copy()
+
+    if go is not None and not worst_ops.empty:
+        worst_ops["label"] = worst_ops["operation_id"].astype(str)
+        custom_cols = [
+            "operation_id", "month", "trade_day", "pnl", "drawdown", "reversal_count",
+            "contracts", "sesion", "hora_inicio", "sequence_end_reason",
+        ]
+        custom_cols = [col for col in custom_cols if col in worst_ops.columns]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=worst_ops["pnl"],
+            y=worst_ops["label"],
+            orientation="h",
+            customdata=worst_ops[custom_cols].to_numpy(),
+            hovertemplate=(
+                "Operación: %{customdata[0]}<br>"
+                "Mes: %{customdata[1]}<br>"
+                "Día: %{customdata[2]}<br>"
+                "PnL: %{x:,.2f}<br>"
+                "Drawdown op: %{customdata[4]:,.2f}<br>"
+                "Reversals: %{customdata[5]}<br>"
+                "Máx contratos: %{customdata[6]}<br>"
+                "Sesión: %{customdata[7]}<br>"
+                "Hora: %{customdata[8]}<br>"
+                "Cierre: %{customdata[9]}<extra></extra>"
+            ),
+            name="Peores operaciones",
+        ))
+        fig.update_layout(
+            title="Operaciones que más dinero quitaron",
+            xaxis_title="PnL",
+            yaxis_title="Operación",
+            height=max(420, top_n * 24),
+            margin=dict(l=120, r=30, t=55, b=40),
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.dataframe(worst_ops, use_container_width=True)
+
+    st.subheader("3. Peores días")
+    worst_days = daily_risk.sort_values("pnl_dia", ascending=True).head(top_n).copy()
+    if go is not None and not worst_days.empty:
+        worst_days["day_label"] = pd.to_datetime(worst_days["trade_day"], errors="coerce").dt.strftime("%Y-%m-%d")
+        custom_cols = ["month", "trade_day", "pnl_dia", "operaciones", "peor_operacion", "drawdown_max", "reversiones_promedio", "contratos_max"]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=worst_days["day_label"],
+            y=worst_days["pnl_dia"],
+            customdata=worst_days[custom_cols].to_numpy(),
+            hovertemplate=(
+                "Día: %{customdata[1]}<br>"
+                "Mes: %{customdata[0]}<br>"
+                "PnL día: %{y:,.2f}<br>"
+                "Operaciones: %{customdata[3]}<br>"
+                "Peor operación: %{customdata[4]:,.2f}<br>"
+                "Drawdown max: %{customdata[5]:,.2f}<br>"
+                "Reversals prom.: %{customdata[6]:.2f}<br>"
+                "Máx contratos: %{customdata[7]}<extra></extra>"
+            ),
+            name="Peores días",
+        ))
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(title="Días que más dañaron el resultado", xaxis_title="Día", yaxis_title="PnL", height=420)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.dataframe(worst_days, use_container_width=True)
+
+    st.subheader("4. Mapa de peligro por hora y día")
+    section_note("Este mapa ayuda a ver si el daño se concentra en ciertas horas o días de la semana.")
+    if "dia_semana" in work.columns and "hora_inicio" in work.columns:
+        week_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        week_es = {
+            "Monday": "Lunes", "Tuesday": "Martes", "Wednesday": "Miércoles", "Thursday": "Jueves",
+            "Friday": "Viernes", "Saturday": "Sábado", "Sunday": "Domingo",
+        }
+        heat = work.groupby(["dia_semana", "hora_inicio"], as_index=False).agg(
+            pnl_total=("pnl", "sum"),
+            operaciones=("operation_id", "count"),
+            peor_operacion=("pnl", "min"),
+            drawdown_max=("drawdown", "max"),
+        )
+        heat["dia_semana"] = pd.Categorical(heat["dia_semana"], categories=week_order, ordered=True)
+        heat = heat.sort_values(["dia_semana", "hora_inicio"])
+        heat["dia_label"] = heat["dia_semana"].astype(str).map(week_es).fillna(heat["dia_semana"].astype(str))
+
+        if go is not None and not heat.empty:
+            pivot = heat.pivot_table(index="dia_label", columns="hora_inicio", values="pnl_total", aggfunc="sum")
+            ops_pivot = heat.pivot_table(index="dia_label", columns="hora_inicio", values="operaciones", aggfunc="sum")
+            worst_pivot = heat.pivot_table(index="dia_label", columns="hora_inicio", values="peor_operacion", aggfunc="min")
+            dd_pivot = heat.pivot_table(index="dia_label", columns="hora_inicio", values="drawdown_max", aggfunc="max")
+            ordered_days = [week_es[d] for d in week_order if week_es[d] in pivot.index]
+            pivot = pivot.reindex(ordered_days)
+            ops_pivot = ops_pivot.reindex(ordered_days)
+            worst_pivot = worst_pivot.reindex(ordered_days)
+            dd_pivot = dd_pivot.reindex(ordered_days)
+            custom = np.dstack([
+                ops_pivot.fillna(0).to_numpy(),
+                worst_pivot.fillna(0).to_numpy(),
+                dd_pivot.fillna(0).to_numpy(),
+            ])
+            fig = go.Figure(data=go.Heatmap(
+                z=pivot.fillna(0).to_numpy(),
+                x=[str(int(x)) + ":00" for x in pivot.columns],
+                y=pivot.index,
+                customdata=custom,
+                colorscale="RdBu",
+                zmid=0,
+                hovertemplate=(
+                    "Día: %{y}<br>"
+                    "Hora: %{x}<br>"
+                    "PnL: %{z:,.2f}<br>"
+                    "Operaciones: %{customdata[0]}<br>"
+                    "Peor operación: %{customdata[1]:,.2f}<br>"
+                    "Drawdown max: %{customdata[2]:,.2f}<extra></extra>"
+                ),
+            ))
+            fig.update_layout(title="Mapa de daño por hora y día", xaxis_title="Hora", yaxis_title="Día", height=420)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(heat, use_container_width=True)
+
+    st.subheader("5. Sesiones y horas peligrosas")
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Horas peligrosas")
-        bad_hours = aggregate_core(ops_df, ["hora_inicio"]).sort_values("pnl_total", ascending=True).head(10)
-        st.dataframe(bad_hours, use_container_width=True)
+        bad_sessions = aggregate_core(work, ["sesion"]).sort_values("pnl_total", ascending=True)
+        if go is not None and not bad_sessions.empty:
+            custom_cols = ["sesion", "operaciones", "pnl_total", "profit_factor", "tasa_acierto", "peor_operacion", "drawdown_max", "reversiones_promedio"]
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=bad_sessions["sesion"].astype(str),
+                y=bad_sessions["pnl_total"],
+                customdata=bad_sessions[custom_cols].to_numpy(),
+                hovertemplate=(
+                    "Sesión: %{customdata[0]}<br>"
+                    "PnL: %{y:,.2f}<br>"
+                    "Operaciones: %{customdata[1]}<br>"
+                    "PF: %{customdata[3]:.2f}<br>"
+                    "Win rate: %{customdata[4]:.1f}%<br>"
+                    "Peor op: %{customdata[5]:,.2f}<br>"
+                    "Drawdown max: %{customdata[6]:,.2f}<br>"
+                    "Reversals prom.: %{customdata[7]:.2f}<extra></extra>"
+                ),
+                name="Sesión",
+            ))
+            fig.add_hline(y=0, line_width=1)
+            fig.update_layout(title="Daño por sesión", xaxis_title="Sesión", yaxis_title="PnL", height=390)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(bad_sessions, use_container_width=True)
     with c2:
-        st.subheader("Sesiones peligrosas")
-        bad_sessions = aggregate_core(ops_df, ["sesion"]).sort_values("pnl_total", ascending=True)
+        bad_hours = aggregate_core(work, ["hora_inicio"]).sort_values("pnl_total", ascending=True)
+        if go is not None and not bad_hours.empty:
+            custom_cols = ["hora_inicio", "operaciones", "pnl_total", "profit_factor", "tasa_acierto", "peor_operacion", "drawdown_max", "reversiones_promedio"]
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=bad_hours["hora_inicio"].astype(str) + ":00",
+                y=bad_hours["pnl_total"],
+                customdata=bad_hours[custom_cols].to_numpy(),
+                hovertemplate=(
+                    "Hora: %{customdata[0]}:00<br>"
+                    "PnL: %{y:,.2f}<br>"
+                    "Operaciones: %{customdata[1]}<br>"
+                    "PF: %{customdata[3]:.2f}<br>"
+                    "Win rate: %{customdata[4]:.1f}%<br>"
+                    "Peor op: %{customdata[5]:,.2f}<br>"
+                    "Drawdown max: %{customdata[6]:,.2f}<br>"
+                    "Reversals prom.: %{customdata[7]:.2f}<extra></extra>"
+                ),
+                name="Hora",
+            ))
+            fig.add_hline(y=0, line_width=1)
+            fig.update_layout(title="Daño por hora", xaxis_title="Hora", yaxis_title="PnL", height=390)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(bad_hours, use_container_width=True)
+
+    st.subheader("6. Operaciones ganadoras pero peligrosas")
+    section_note("Estas operaciones cerraron positivas, pero tuvieron drawdown alto. Son importantes porque pueden verse bonitas en PnL, pero ser difíciles de sobrevivir en real.")
+    if dangerous_winners.empty:
+        st.info("No se detectaron ganadoras peligrosas con los datos actuales.")
+    else:
+        if go is not None:
+            plot_df = dangerous_winners.sort_values("drawdown", ascending=False).head(30).copy()
+            custom_cols = ["operation_id", "month", "trade_day", "pnl", "drawdown", "reversal_count", "contracts", "sesion", "hora_inicio"]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=plot_df["drawdown"],
+                y=plot_df["pnl"],
+                mode="markers",
+                marker=dict(size=np.clip(plot_df["contracts"].fillna(1) * 4, 8, 32)),
+                customdata=plot_df[custom_cols].to_numpy(),
+                hovertemplate=(
+                    "Operación: %{customdata[0]}<br>"
+                    "Mes: %{customdata[1]}<br>"
+                    "Día: %{customdata[2]}<br>"
+                    "PnL final: %{y:,.2f}<br>"
+                    "Drawdown sufrido: %{x:,.2f}<br>"
+                    "Reversals: %{customdata[5]}<br>"
+                    "Contratos: %{customdata[6]}<br>"
+                    "Sesión: %{customdata[7]}<br>"
+                    "Hora: %{customdata[8]}<extra></extra>"
+                ),
+            ))
+            fig.update_layout(title="Ganadoras que sufrieron demasiado", xaxis_title="Drawdown de la operación", yaxis_title="PnL final", height=420)
+            st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Ver tabla de ganadoras peligrosas", expanded=False):
+            cols = [
+                "month", "trade_day", "operation_id", "sequence_started_at", "pnl", "drawdown",
+                "reversal_count", "contracts", "sesion", "hora_inicio", "sequence_end_reason", "config_key",
+            ]
+            st.dataframe(dangerous_winners[[c for c in cols if c in dangerous_winners.columns]].sort_values("drawdown", ascending=False), use_container_width=True)
+
+    with st.expander("Ver tablas detalladas", expanded=False):
+        st.markdown("**Peores operaciones**")
+        cols = [
+            "month", "trade_day", "operation_id", "sequence_started_at", "pnl", "drawdown",
+            "reversal_count", "contracts", "sesion", "hora_inicio", "sequence_end_reason", "config_key",
+        ]
+        st.dataframe(worst_ops[[c for c in cols if c in worst_ops.columns]], use_container_width=True)
+        st.markdown("**Peores días**")
+        st.dataframe(worst_days, use_container_width=True)
+        st.markdown("**Sesiones peligrosas**")
         st.dataframe(bad_sessions, use_container_width=True)
+        st.markdown("**Horas peligrosas**")
+        st.dataframe(bad_hours, use_container_width=True)
 
     lines = []
-    if not worst_ops.empty:
-        row = worst_ops.iloc[0]
-        lines.append(f"Peor operación: {row['operation_id']} con PnL {fmt_money(row['sequence_net_pnl_currency'])}.")
-    if not worst_days.empty:
-        row = worst_days.iloc[0]
-        lines.append(f"Peor día: {row['trade_day']} con PnL {fmt_money(row['pnl_dia'])}.")
+    if worst_op is not None:
+        lines.append(f"Peor operación: {worst_op['operation_id']} con PnL {fmt_money(worst_op['pnl'])}.")
+    if worst_day is not None:
+        lines.append(f"Peor día: {worst_day['trade_day']} con PnL {fmt_money(worst_day['pnl_dia'])}.")
+    if not bad_sessions.empty:
+        row = bad_sessions.iloc[0]
+        lines.append(f"Sesión más débil por PnL: {row['sesion']}.")
     if not bad_hours.empty:
         row = bad_hours.iloc[0]
         lines.append(f"Hora más débil por PnL: {int(row['hora_inicio'])}:00.")
+    if pd.notna(concentration) and concentration >= 50:
+        lines.append("Gran parte de la pérdida viene de muy pocas operaciones; revisar límites de pérdida, reversals y horarios de esas operaciones primero.")
     show_conclusion("Risk Killers", lines)
 
 
