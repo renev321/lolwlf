@@ -3239,41 +3239,80 @@ def render_risk_killers(ops_df: pd.DataFrame):
         else:
             st.dataframe(bad_hours, use_container_width=True)
 
-    st.subheader("6. Operaciones ganadoras pero peligrosas")
-    section_note("Estas operaciones cerraron positivas, pero tuvieron drawdown alto. Son importantes porque pueden verse bonitas en PnL, pero ser difíciles de sobrevivir en real.")
+    st.subheader("6. Trades que ganaron, pero casi salieron mal")
+    section_note(
+        "Aquí buscamos wins que no fueron limpios. El trade terminó en ganancia, pero antes llegó a estar bastante negativo. "
+        "Esto ayuda a detectar operaciones que se ven bien en el resultado final, pero que pudieron haber quemado una cuenta o activado un límite de pérdida."
+    )
     if dangerous_winners.empty:
-        st.info("No se detectaron ganadoras peligrosas con los datos actuales.")
+        st.info("No se detectaron wins peligrosos con los datos actuales.")
     else:
+        plot_df = dangerous_winners.sort_values("drawdown", ascending=False).head(20).copy()
+        plot_df["trade_label"] = (
+            plot_df["trade_day"].astype(str)
+            + " · "
+            + plot_df["operation_id"].astype(str).str[-6:]
+        )
+        plot_df["caida_sufrida"] = plot_df["drawdown"].abs()
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            card("Wins revisados", f"{len(dangerous_winners)}")
+        with c2:
+            card("Mayor caída antes de ganar", fmt_money(plot_df["caida_sufrida"].max()))
+        with c3:
+            card("Ganancia final promedio", fmt_money(dangerous_winners["pnl"].mean()))
+
         if go is not None:
-            plot_df = dangerous_winners.sort_values("drawdown", ascending=False).head(30).copy()
-            custom_cols = ["operation_id", "month", "trade_day", "pnl", "drawdown", "reversal_count", "contracts", "sesion", "hora_inicio"]
+            custom_cols = [
+                "operation_id", "month", "trade_day", "pnl", "caida_sufrida",
+                "reversal_count", "contracts", "sesion", "hora_inicio",
+            ]
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=plot_df["drawdown"],
-                y=plot_df["pnl"],
-                mode="markers",
-                marker=dict(size=np.clip(plot_df["contracts"].fillna(1) * 4, 8, 32)),
+            fig.add_trace(go.Bar(
+                x=plot_df["trade_label"],
+                y=plot_df["caida_sufrida"],
                 customdata=plot_df[custom_cols].to_numpy(),
                 hovertemplate=(
                     "Operación: %{customdata[0]}<br>"
                     "Mes: %{customdata[1]}<br>"
                     "Día: %{customdata[2]}<br>"
-                    "PnL final: %{y:,.2f}<br>"
-                    "Drawdown sufrido: %{x:,.2f}<br>"
+                    "Caída antes de ganar: %{y:,.2f}<br>"
+                    "Ganancia final: %{customdata[3]:,.2f}<br>"
                     "Reversals: %{customdata[5]}<br>"
                     "Contratos: %{customdata[6]}<br>"
                     "Sesión: %{customdata[7]}<br>"
                     "Hora: %{customdata[8]}<extra></extra>"
                 ),
+                name="Caída antes de ganar",
             ))
-            fig.update_layout(title="Ganadoras que sufrieron demasiado", xaxis_title="Drawdown de la operación", yaxis_title="PnL final", height=420)
+            fig.update_layout(
+                title="Wins con mayor sufrimiento antes de cerrar positivo",
+                xaxis_title="Trade",
+                yaxis_title="Caída antes de ganar",
+                height=420,
+            )
+            fig.update_xaxes(tickangle=35)
             st.plotly_chart(fig, use_container_width=True)
-        with st.expander("Ver tabla de ganadoras peligrosas", expanded=False):
+        else:
+            st.dataframe(plot_df, use_container_width=True)
+
+        with st.expander("Ver detalle de estos wins", expanded=False):
+            show = dangerous_winners.copy()
+            show["caida_antes_de_ganar"] = show["drawdown"].abs()
+            show = show.rename(columns={
+                "pnl": "ganancia_final",
+                "drawdown": "drawdown_original",
+                "reversal_count": "reversals",
+                "contracts": "contratos",
+                "sesion": "sesión",
+                "hora_inicio": "hora",
+            })
             cols = [
-                "month", "trade_day", "operation_id", "sequence_started_at", "pnl", "drawdown",
-                "reversal_count", "contracts", "sesion", "hora_inicio", "sequence_end_reason", "config_key",
+                "month", "trade_day", "operation_id", "sequence_started_at", "ganancia_final", "caida_antes_de_ganar",
+                "reversals", "contratos", "sesión", "hora", "sequence_end_reason", "config_key",
             ]
-            st.dataframe(dangerous_winners[[c for c in cols if c in dangerous_winners.columns]].sort_values("drawdown", ascending=False), use_container_width=True)
+            st.dataframe(show[[c for c in cols if c in show.columns]].sort_values("caida_antes_de_ganar", ascending=False), use_container_width=True)
 
     with st.expander("Ver tablas detalladas", expanded=False):
         st.markdown("**Peores operaciones**")
