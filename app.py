@@ -6,6 +6,7 @@ import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     import plotly.graph_objects as go
@@ -154,6 +155,7 @@ def render_clean_daily_pnl_chart(daily_df: pd.DataFrame):
         return
 
     # Fallback if Plotly is not available. This is static, but still keeps dates clean.
+    st.warning("Plotly no está instalado en este entorno. El gráfico será estático. Para hover/interactividad agrega `plotly` en requirements.txt y reinicia la app.")
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.bar(chart_df["trade_day"], chart_df["pnl_total"], width=0.8)
     ax.axhline(0, linewidth=1)
@@ -736,54 +738,102 @@ def calcular_resultado_simulado_por_cap_reversal(
     legs_df: pd.DataFrame,
     max_reversal_permitido: int,
 ) -> Dict[str, object]:
-    """Simula el resultado si la operación se hubiera cortado al máximo reversal permitido."""
+    """
+    Simula el resultado de una operación si el bot NO pudiera pasar del reversal seleccionado.
+
+    Regla importante:
+    - Base entry = reversal_number 0.
+    - Reversal 1 = reversal_number 1.
+    - Reversal 2 = reversal_number 2.
+    - Si seleccionas 3 y una operación real llegó a 4, significa que el reversal 3 perdió.
+      Por eso el resultado simulado debe ser el PnL acumulado después de cerrar el reversal 3,
+      no el resultado final real de la operación.
+    """
     real_pnl = float(op_row.get("sequence_net_pnl_currency", 0) or 0)
     real_rev = int(op_row.get("reversal_count", 0) or 0)
+    operation_id = str(op_row.get("operation_id", ""))
 
+    real_end_time = op_row.get("sequence_ended_at", op_row.get("sequence_started_at", pd.NaT))
+
+    # If the real operation did not exceed the selected max reversal, keep the real final result.
     if real_rev <= max_reversal_permitido:
         return {
             "reversal_count_simulado": real_rev,
             "sequence_net_pnl_simulado": real_pnl,
-            "sequence_end_reason_simulado": op_row.get("sequence_end_reason", "Real result"),
+            "sequence_end_reason_simulado": op_row.get("sequence_end_reason", "Resultado real"),
+            "simulated_stop_time": real_end_time,
             "cap_aplicado": False,
+            "resultado_cambiado": False,
+            "sim_detail": "No se corta: la operación real no pasó del reversal seleccionado.",
         }
 
-    operation_id = str(op_row.get("operation_id", ""))
     legs_op = legs_df[legs_df["operation_id"].astype(str) == operation_id].copy() if not legs_df.empty else pd.DataFrame()
 
     if legs_op.empty or "reversal_number" not in legs_op.columns:
         return {
             "reversal_count_simulado": max_reversal_permitido,
             "sequence_net_pnl_simulado": real_pnl,
-            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}_SIN_LEGS",
+            "sequence_end_reason_simulado": f"SIN_LEGS_PARA_SIMULAR_{max_reversal_permitido}",
+            "simulated_stop_time": real_end_time,
             "cap_aplicado": True,
+            "resultado_cambiado": False,
+            "sim_detail": "Se debía cortar, pero no hay piernas suficientes; se mantiene el resultado real.",
         }
 
-    legs_op = legs_op.sort_values("leg_index")
-    target_leg = legs_op[legs_op["reversal_number"].fillna(-1).astype(int) == int(max_reversal_permitido)].copy()
+    legs_op = legs_op.copy()
+    legs_op["reversal_number_int"] = pd.to_numeric(legs_op["reversal_number"], errors="coerce").fillna(-1).astype(int)
+    legs_op["leg_index_num"] = pd.to_numeric(legs_op.get("leg_index", np.nan), errors="coerce")
+    legs_op = legs_op.sort_values(["leg_index_num", "exit_time"], na_position="last")
+
+    # The selected max reversal means: allow that reversal to close, then stop if the real trade continued deeper.
+    target_leg = legs_op[legs_op["reversal_number_int"] == int(max_reversal_permitido)].copy()
 
     if target_leg.empty:
         return {
             "reversal_count_simulado": max_reversal_permitido,
             "sequence_net_pnl_simulado": real_pnl,
-            "sequence_end_reason_simulado": f"CAP_{max_reversal_permitido}_SIN_PIERNA",
+            "sequence_end_reason_simulado": f"SIN_PIERNA_REV_{max_reversal_permitido}",
+            "simulated_stop_time": real_end_time,
             "cap_aplicado": True,
+            "resultado_cambiado": False,
+            "sim_detail": "Se debía cortar, pero no existe la pierna del reversal seleccionado; se mantiene el resultado real.",
         }
 
-    last_leg = target_leg.sort_values("leg_index").iloc[-1]
-    pnl_sim = last_leg.get("cumulative_sequence_pnl_after_leg", np.nan)
-    if pd.isna(pnl_sim):
-        pnl_sim = real_pnl
+    last_allowed_leg = target_leg.sort_values(["leg_index_num", "exit_time"], na_position="last").iloc[-1]
 
-    exit_reason = last_leg.get("exit_reason", "")
+    pnl_sim = last_allowed_leg.get("cumulative_sequence_pnl_after_leg", np.nan)
+    if pd.isna(pnl_sim):
+        # Fallback: sum realized PnL from the first leg up to the allowed leg.
+        allowed_leg_index = last_allowed_leg.get("leg_index_num", np.nan)
+        if pd.notna(allowed_leg_index) and "realized_pnl_currency" in legs_op.columns:
+            pnl_sim = pd.to_numeric(
+                legs_op.loc[legs_op["leg_index_num"] <= allowed_leg_index, "realized_pnl_currency"],
+                errors="coerce",
+            ).fillna(0).sum()
+        else:
+            pnl_sim = real_pnl
+
+    stop_time = last_allowed_leg.get("exit_time", real_end_time)
+    if pd.isna(stop_time):
+        stop_time = real_end_time
+
+    exit_reason = last_allowed_leg.get("exit_reason", "")
     if pd.isna(exit_reason) or str(exit_reason).strip() == "":
-        exit_reason = f"CAP_{max_reversal_permitido}"
+        exit_reason = f"CORTADO_DESPUES_REV_{max_reversal_permitido}"
+
+    pnl_sim = float(pnl_sim)
 
     return {
         "reversal_count_simulado": max_reversal_permitido,
-        "sequence_net_pnl_simulado": float(pnl_sim),
+        "sequence_net_pnl_simulado": pnl_sim,
         "sequence_end_reason_simulado": str(exit_reason),
+        "simulated_stop_time": stop_time,
         "cap_aplicado": True,
+        "resultado_cambiado": abs(pnl_sim - real_pnl) > 0.000001,
+        "sim_detail": (
+            f"Cortada después de cerrar reversal {max_reversal_permitido}. "
+            f"La operación real llegó a reversal {real_rev}."
+        ),
     }
 
 
@@ -797,8 +847,123 @@ def aplicar_cap_reversal(ops_df: pd.DataFrame, legs_df: pd.DataFrame, max_revers
         axis=1,
     )
     resultados_df = pd.DataFrame(resultados.tolist(), index=base.index)
-    return pd.concat([base, resultados_df], axis=1)
+    out = pd.concat([base, resultados_df], axis=1)
+    out["simulated_stop_time"] = pd.to_datetime(out.get("simulated_stop_time"), errors="coerce")
+    return out
 
+
+def profit_factor_from_pnl(pnl_series: pd.Series) -> float:
+    pnl = pd.to_numeric(pnl_series, errors="coerce").dropna()
+    winners = pnl[pnl > 0]
+    losers = pnl[pnl < 0]
+    gross_profit = winners.sum()
+    gross_loss = abs(losers.sum())
+    return gross_profit / gross_loss if gross_loss > 0 else np.nan
+
+
+def max_drawdown_from_pnl_sequence(df: pd.DataFrame, pnl_col: str, time_col: str) -> Dict[str, object]:
+    """Calculates account max drawdown from a chronological sequence of PnL results."""
+    if df.empty or pnl_col not in df.columns:
+        return {
+            "max_drawdown": np.nan,
+            "peak_equity": np.nan,
+            "trough_equity": np.nan,
+            "ending_equity": np.nan,
+            "peak_time": pd.NaT,
+            "trough_time": pd.NaT,
+        }
+
+    work = df.copy()
+    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0)
+    if time_col in work.columns:
+        work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
+        work = work.sort_values(time_col, na_position="last")
+    else:
+        work = work.reset_index(drop=True)
+
+    work["equity_tmp"] = work[pnl_col].cumsum()
+    work["peak_tmp"] = work["equity_tmp"].cummax()
+    work["drawdown_tmp"] = work["equity_tmp"] - work["peak_tmp"]
+
+    if work.empty:
+        return {"max_drawdown": np.nan}
+
+    trough_idx = work["drawdown_tmp"].idxmin()
+    max_dd = float(work.loc[trough_idx, "drawdown_tmp"])
+    trough_equity = float(work.loc[trough_idx, "equity_tmp"])
+    peak_equity = float(work.loc[trough_idx, "peak_tmp"])
+
+    prior = work.loc[:trough_idx].copy()
+    peak_rows = prior[prior["equity_tmp"] == peak_equity]
+    peak_idx = peak_rows.index[-1] if not peak_rows.empty else trough_idx
+
+    return {
+        "max_drawdown": max_dd,
+        "peak_equity": peak_equity,
+        "trough_equity": trough_equity,
+        "ending_equity": float(work["equity_tmp"].iloc[-1]),
+        "peak_time": work.loc[peak_idx, time_col] if time_col in work.columns else pd.NaT,
+        "trough_time": work.loc[trough_idx, time_col] if time_col in work.columns else pd.NaT,
+    }
+
+
+def simulated_reversal_metrics(ops_df: pd.DataFrame, legs_df: pd.DataFrame, max_reversal_permitido: int) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    sim_df = aplicar_cap_reversal(ops_df, legs_df, max_reversal_permitido)
+    if sim_df.empty:
+        return sim_df, {}
+
+    real_pnl_col = "sequence_net_pnl_currency"
+    sim_pnl_col = "sequence_net_pnl_simulado"
+
+    real_time_col = "sequence_ended_at" if "sequence_ended_at" in ops_df.columns else "sequence_started_at"
+    sim_time_col = "simulated_stop_time"
+
+    real_dd = max_drawdown_from_pnl_sequence(ops_df, real_pnl_col, real_time_col)
+    sim_dd = max_drawdown_from_pnl_sequence(sim_df, sim_pnl_col, sim_time_col)
+
+    metrics = {
+        "real_pnl": pd.to_numeric(ops_df[real_pnl_col], errors="coerce").fillna(0).sum(),
+        "sim_pnl": pd.to_numeric(sim_df[sim_pnl_col], errors="coerce").fillna(0).sum(),
+        "real_pf": profit_factor_from_pnl(ops_df[real_pnl_col]),
+        "sim_pf": profit_factor_from_pnl(sim_df[sim_pnl_col]),
+        "real_max_dd": real_dd.get("max_drawdown", np.nan),
+        "sim_max_dd": sim_dd.get("max_drawdown", np.nan),
+        "ops_cortadas": int(sim_df["cap_aplicado"].sum()) if "cap_aplicado" in sim_df.columns else 0,
+        "ops_resultado_cambiado": int(sim_df["resultado_cambiado"].sum()) if "resultado_cambiado" in sim_df.columns else 0,
+        "worst_real_op": pd.to_numeric(ops_df[real_pnl_col], errors="coerce").min(),
+        "worst_sim_op": pd.to_numeric(sim_df[sim_pnl_col], errors="coerce").min(),
+    }
+    metrics["pnl_diff"] = metrics["sim_pnl"] - metrics["real_pnl"]
+    metrics["pf_diff"] = metrics["sim_pf"] - metrics["real_pf"] if pd.notna(metrics["sim_pf"]) and pd.notna(metrics["real_pf"]) else np.nan
+    metrics["dd_diff"] = metrics["sim_max_dd"] - metrics["real_max_dd"] if pd.notna(metrics["sim_max_dd"]) and pd.notna(metrics["real_max_dd"]) else np.nan
+    return sim_df, metrics
+
+
+def monthly_simulated_reversal_summary(sim_df: pd.DataFrame) -> pd.DataFrame:
+    if sim_df.empty or "month" not in sim_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for month, g in sim_df.groupby("month"):
+        real_time_col = "sequence_ended_at" if "sequence_ended_at" in g.columns else "sequence_started_at"
+        real_dd = max_drawdown_from_pnl_sequence(g, "sequence_net_pnl_currency", real_time_col)
+        sim_dd = max_drawdown_from_pnl_sequence(g, "sequence_net_pnl_simulado", "simulated_stop_time")
+        real_pnl = pd.to_numeric(g["sequence_net_pnl_currency"], errors="coerce").fillna(0).sum()
+        sim_pnl = pd.to_numeric(g["sequence_net_pnl_simulado"], errors="coerce").fillna(0).sum()
+        rows.append({
+            "month": month,
+            "operaciones": len(g),
+            "pnl_real": real_pnl,
+            "pnl_reversal_seleccionado": sim_pnl,
+            "diferencia_pnl": sim_pnl - real_pnl,
+            "profit_factor_real": profit_factor_from_pnl(g["sequence_net_pnl_currency"]),
+            "profit_factor_reversal_seleccionado": profit_factor_from_pnl(g["sequence_net_pnl_simulado"]),
+            "max_drawdown_real": real_dd.get("max_drawdown", np.nan),
+            "max_drawdown_reversal_seleccionado": sim_dd.get("max_drawdown", np.nan),
+            "operaciones_cortadas": int(g["cap_aplicado"].sum()) if "cap_aplicado" in g.columns else 0,
+            "resultados_cambiados": int(g["resultado_cambiado"].sum()) if "resultado_cambiado" in g.columns else 0,
+        })
+    return pd.DataFrame(rows).sort_values("month")
 
 
 def build_consecutive_loss_streaks(df: pd.DataFrame, pnl_col: str, time_col: str, id_col: str, unit_label: str) -> pd.DataFrame:
@@ -1018,9 +1183,6 @@ def apply_global_filters(ops_df: pd.DataFrame, legs_df: pd.DataFrame) -> Tuple[p
                     & (filtered_legs["sequence_started_at"].dt.date <= end_date)
                 ]
 
-    st.sidebar.metric("Operaciones filtradas", len(filtered_ops))
-    st.sidebar.metric("Piernas filtradas", len(filtered_legs))
-
     return filtered_ops, filtered_legs
 
 
@@ -1134,6 +1296,8 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             fig.update_xaxes(nticks=10, tickformat="%b %d")
             st.plotly_chart(fig, use_container_width=True)
         else:
+            if go is None:
+                st.warning("Plotly no está instalado en este entorno. El gráfico será estático. Para hover/interactividad agrega `plotly` en requirements.txt y reinicia la app.")
             fig, ax = plt.subplots(figsize=(11, 4))
             ax.plot(curve["event_time"], curve["equity"], label="Cuenta actual")
             ax.plot(curve["event_time"], curve["peak_equity"], label="Mejor punto alcanzado")
@@ -1178,46 +1342,48 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         help="Ejemplo: si eliges 2, las operaciones que llegaron a reversal 3 o más se simulan cortadas después del reversal 2.",
     )
 
-    dashboard_sim = aplicar_cap_reversal(ops_df, legs_df, dashboard_max_reversal)
-    real_pnl = ops_df["sequence_net_pnl_currency"].sum()
-    sim_pnl = dashboard_sim["sequence_net_pnl_simulado"].sum()
-    pnl_diff = sim_pnl - real_pnl
-    affected_ops = int(dashboard_sim["cap_aplicado"].sum()) if "cap_aplicado" in dashboard_sim.columns else 0
-    worst_sim = dashboard_sim["sequence_net_pnl_simulado"].min() if "sequence_net_pnl_simulado" in dashboard_sim.columns else np.nan
+    dashboard_sim, rev_metrics = simulated_reversal_metrics(ops_df, legs_df, dashboard_max_reversal)
 
     c = st.columns(4)
-    with c[0]: card("PnL Real", fmt_money(real_pnl))
-    with c[1]: card("PnL con Max Reversal", fmt_money(sim_pnl))
-    with c[2]: card("Diferencia", fmt_money(pnl_diff))
-    with c[3]: card("Ops Afectadas", str(affected_ops))
+    with c[0]: card("PnL Real", fmt_money(rev_metrics.get("real_pnl", np.nan)))
+    with c[1]: card("PnL Reversal Seleccionado", fmt_money(rev_metrics.get("sim_pnl", np.nan)))
+    with c[2]: card("Diferencia PnL", fmt_money(rev_metrics.get("pnl_diff", np.nan)))
+    with c[3]: card("Ops Cortadas", str(rev_metrics.get("ops_cortadas", 0)))
 
     c = st.columns(4)
-    with c[0]: card("Peor Op Real", fmt_money(m["worst_op"]))
-    with c[1]: card("Peor Op Simulada", fmt_money(worst_sim))
+    with c[0]: card("Profit Factor Real", "-" if pd.isna(rev_metrics.get("real_pf", np.nan)) else f"{rev_metrics.get('real_pf'):.2f}")
+    with c[1]: card("PF Reversal Seleccionado", "-" if pd.isna(rev_metrics.get("sim_pf", np.nan)) else f"{rev_metrics.get('sim_pf'):.2f}")
+    with c[2]: card("Max DD Real", fmt_money(rev_metrics.get("real_max_dd", np.nan)))
+    with c[3]: card("Max DD Seleccionado", fmt_money(rev_metrics.get("sim_max_dd", np.nan)))
+
+    c = st.columns(4)
+    with c[0]: card("Peor Op Real", fmt_money(rev_metrics.get("worst_real_op", np.nan)))
+    with c[1]: card("Peor Op Seleccionada", fmt_money(rev_metrics.get("worst_sim_op", np.nan)))
     with c[2]: card("Max Reversal Real", str(max_real_rev))
-    with c[3]: card("Max Reversal Usado", str(dashboard_max_reversal))
+    with c[3]: card("Resultados Cambiados", str(rev_metrics.get("ops_resultado_cambiado", 0)))
 
-    sim_month = dashboard_sim.groupby("month", as_index=False).agg(
-        pnl_real=("sequence_net_pnl_currency", "sum"),
-        pnl_simulado=("sequence_net_pnl_simulado", "sum"),
-        operaciones=("operation_id", "count"),
-        operaciones_afectadas=("cap_aplicado", "sum"),
-    ) if "month" in dashboard_sim.columns and not dashboard_sim.empty else pd.DataFrame()
+    section_note(
+        "Ops Cortadas = operaciones que en la realidad pasaron del reversal seleccionado. "
+        "Ejemplo: si eliges 3 y una operación real llegó a 4, se corta después de cerrar el reversal 3. "
+        "Si esa operación ganó en reversal 4, en esta simulación normalmente queda como pérdida en reversal 3."
+    )
+
+    sim_month = monthly_simulated_reversal_summary(dashboard_sim)
     if not sim_month.empty:
-        sim_month["diferencia"] = sim_month["pnl_simulado"] - sim_month["pnl_real"]
-        st.markdown("**Impacto mensual del máximo reversal permitido**")
-        st.dataframe(sim_month.sort_values("month"), use_container_width=True)
+        st.markdown("**Impacto mensual del reversal seleccionado**")
+        st.dataframe(sim_month, use_container_width=True)
 
     changed_dashboard = dashboard_sim[dashboard_sim["cap_aplicado"] == True].copy() if "cap_aplicado" in dashboard_sim.columns else pd.DataFrame()
     if not changed_dashboard.empty:
         changed_dashboard["diferencia"] = changed_dashboard["sequence_net_pnl_simulado"] - changed_dashboard["sequence_net_pnl_currency"]
         show_cols = [
-            "month", "trade_day", "operation_id", "sequence_started_at",
+            "month", "trade_day", "operation_id", "sequence_started_at", "simulated_stop_time",
             "reversal_count", "reversal_count_simulado",
             "sequence_net_pnl_currency", "sequence_net_pnl_simulado", "diferencia",
-            "operation_max_drawdown_currency", "base_contracts", "sesion", "hora_inicio",
+            "operation_max_drawdown_currency", "base_contracts", "sesion", "hora_inicio", "sim_detail",
         ]
-        st.markdown("**Operaciones cambiadas por el máximo reversal permitido**")
+        show_cols = [c for c in show_cols if c in changed_dashboard.columns]
+        st.markdown("**Operaciones cortadas por el reversal seleccionado**")
         st.dataframe(changed_dashboard[show_cols].sort_values("diferencia"), use_container_width=True)
 
     st.markdown("---")
@@ -1368,26 +1534,33 @@ def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         help="Ejemplo: si eliges 2, cualquier operación que llegó a reversal 3 o 4 se corta en el resultado acumulado después del reversal 2.",
     )
 
-    sim_df = aplicar_cap_reversal(ops_df, legs_df, max_reversal_permitido)
-
-    real_pnl = ops_df["sequence_net_pnl_currency"].sum()
-    sim_pnl = sim_df["sequence_net_pnl_simulado"].sum()
-    ops_afectadas = int(sim_df["cap_aplicado"].sum()) if "cap_aplicado" in sim_df.columns else 0
-    peor_real = ops_df["sequence_net_pnl_currency"].min()
-    peor_sim = sim_df["sequence_net_pnl_simulado"].min()
+    sim_df, sim_metrics = simulated_reversal_metrics(ops_df, legs_df, max_reversal_permitido)
 
     c = st.columns(4)
-    with c[0]: card("PnL Real", fmt_money(real_pnl))
-    with c[1]: card("PnL Simulado", fmt_money(sim_pnl))
-    with c[2]: card("Operaciones Cortadas", str(ops_afectadas))
-    with c[3]: card("Peor Op Simulada", fmt_money(peor_sim))
+    with c[0]: card("PnL Real", fmt_money(sim_metrics.get("real_pnl", np.nan)))
+    with c[1]: card("PnL Reversal Seleccionado", fmt_money(sim_metrics.get("sim_pnl", np.nan)))
+    with c[2]: card("Operaciones Cortadas", str(sim_metrics.get("ops_cortadas", 0)))
+    with c[3]: card("Resultados Cambiados", str(sim_metrics.get("ops_resultado_cambiado", 0)))
+
+    c = st.columns(4)
+    with c[0]: card("Profit Factor Real", "-" if pd.isna(sim_metrics.get("real_pf", np.nan)) else f"{sim_metrics.get('real_pf'):.2f}")
+    with c[1]: card("PF Reversal Seleccionado", "-" if pd.isna(sim_metrics.get("sim_pf", np.nan)) else f"{sim_metrics.get('sim_pf'):.2f}")
+    with c[2]: card("Max DD Real", fmt_money(sim_metrics.get("real_max_dd", np.nan)))
+    with c[3]: card("Max DD Seleccionado", fmt_money(sim_metrics.get("sim_max_dd", np.nan)))
 
     cap_summary = pd.DataFrame([
-        {"métrica": "PnL total", "real": real_pnl, "simulado": sim_pnl, "diferencia": sim_pnl - real_pnl},
-        {"métrica": "Peor operación", "real": peor_real, "simulado": peor_sim, "diferencia": peor_sim - peor_real},
-        {"métrica": "Operaciones afectadas", "real": 0, "simulado": ops_afectadas, "diferencia": ops_afectadas},
+        {"métrica": "PnL total", "real": sim_metrics.get("real_pnl", np.nan), "reversal_seleccionado": sim_metrics.get("sim_pnl", np.nan), "diferencia": sim_metrics.get("pnl_diff", np.nan)},
+        {"métrica": "Profit factor", "real": sim_metrics.get("real_pf", np.nan), "reversal_seleccionado": sim_metrics.get("sim_pf", np.nan), "diferencia": sim_metrics.get("pf_diff", np.nan)},
+        {"métrica": "Max drawdown", "real": sim_metrics.get("real_max_dd", np.nan), "reversal_seleccionado": sim_metrics.get("sim_max_dd", np.nan), "diferencia": sim_metrics.get("dd_diff", np.nan)},
+        {"métrica": "Peor operación", "real": sim_metrics.get("worst_real_op", np.nan), "reversal_seleccionado": sim_metrics.get("worst_sim_op", np.nan), "diferencia": sim_metrics.get("worst_sim_op", np.nan) - sim_metrics.get("worst_real_op", np.nan)},
+        {"métrica": "Operaciones cortadas", "real": 0, "reversal_seleccionado": sim_metrics.get("ops_cortadas", 0), "diferencia": sim_metrics.get("ops_cortadas", 0)},
     ])
     st.dataframe(cap_summary, use_container_width=True)
+
+    month_sim = monthly_simulated_reversal_summary(sim_df)
+    if not month_sim.empty:
+        st.markdown("**Impacto mensual del reversal seleccionado**")
+        st.dataframe(month_sim, use_container_width=True)
 
     detail_cols = [
         "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count", "reversal_count_simulado",
@@ -1421,11 +1594,15 @@ def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         lines.append(f"Mejor PnL promedio real: {int(best['reversal_count']) if pd.notna(best['reversal_count']) else 0} reversal(es).")
         lines.append(f"Peor PnL promedio real: {int(worst['reversal_count']) if pd.notna(worst['reversal_count']) else 0} reversal(es).")
         lines.append(f"Mayor drawdown promedio real: {int(risky['reversal_count']) if pd.notna(risky['reversal_count']) else 0} reversal(es).")
-    lines.append(f"Con cap = {max_reversal_permitido}, el PnL cambia de {fmt_money(real_pnl)} a {fmt_money(sim_pnl)}.")
-    if peor_sim > peor_real:
-        lines.append("El cap mejora el peor caso; esto puede ser bueno para control de riesgo.")
-    elif peor_sim < peor_real:
-        lines.append("El cap empeora el peor caso en esta simulación; revisar antes de usarlo.")
+    lines.append(
+        f"Con reversal seleccionado = {max_reversal_permitido}, "
+        f"el PnL cambia de {fmt_money(sim_metrics.get('real_pnl', np.nan))} "
+        f"a {fmt_money(sim_metrics.get('sim_pnl', np.nan))}."
+    )
+    if sim_metrics.get("worst_sim_op", np.nan) > sim_metrics.get("worst_real_op", np.nan):
+        lines.append("El reversal seleccionado mejora el peor caso; esto puede ayudar al control de riesgo.")
+    elif sim_metrics.get("worst_sim_op", np.nan) < sim_metrics.get("worst_real_op", np.nan):
+        lines.append("El reversal seleccionado empeora el peor caso en esta simulación; revisar antes de usarlo.")
     show_conclusion("Motor de Reversiones", lines)
 
 
@@ -1751,6 +1928,48 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
 
 # ============================================================
+# NAVIGATION HELPERS
+# ============================================================
+
+
+def scroll_to_top_on_page_change(page: str):
+    previous_page = st.session_state.get("_previous_main_page")
+    page_changed = previous_page != page
+    st.session_state["_previous_main_page"] = page
+
+    if page_changed:
+        components.html(
+            """
+            <script>
+            function scrollParentToTop() {
+                try {
+                    const doc = window.parent.document;
+                    const candidates = [
+                        doc.querySelector('[data-testid="stAppViewContainer"]'),
+                        doc.querySelector('section.main'),
+                        doc.documentElement,
+                        doc.body
+                    ];
+
+                    for (const el of candidates) {
+                        if (el && typeof el.scrollTo === 'function') {
+                            el.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+                        }
+                    }
+
+                    window.parent.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+                } catch (e) {
+                    window.parent.scrollTo(0, 0);
+                }
+            }
+            setTimeout(scrollParentToTop, 50);
+            </script>
+            """,
+            height=0,
+        )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -1759,11 +1978,34 @@ def main():
     st.title("Laboratorio WLF")
     st.caption("Análisis simple para decidir qué mantener, qué bloquear y qué setting probar.")
 
+    pages = [
+        "Dashboard General",
+        "Tiempo y Sesiones",
+        "Motor de Reversiones",
+        "Simulador Diario",
+        "Laboratorio de Parámetros",
+        "Risk Killers",
+        "Explorador de Operaciones",
+    ]
+
     uploaded_files = st.sidebar.file_uploader(
         "Cargar archivos JSONL mensuales",
         type=["jsonl"],
         accept_multiple_files=True,
     )
+
+    # Navigation stays immediately below the JSON uploader.
+    # This way you always choose the page first, before the long filters.
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Menú principal")
+    page = st.sidebar.radio(
+        "Selecciona una página",
+        pages,
+        index=0,
+        key="main_page_selector",
+    )
+
+    scroll_to_top_on_page_change(page)
 
     records = load_uploaded_jsonl_files(uploaded_files)
     ops_df, legs_df = build_dataframes(records)
@@ -1772,23 +2014,24 @@ def main():
         st.warning("Sube uno o más JSONL para iniciar el análisis.")
         return
 
-    st.sidebar.metric("Operaciones cargadas", len(ops_df))
-    st.sidebar.metric("Piernas cargadas", len(legs_df))
-
+    # Correct sidebar order:
+    # 1) Upload JSONL files
+    # 2) Main menu
+    # 3) Global filters
+    # 4) Loaded / filtered data metrics
     ops_filtered, legs_filtered = apply_global_filters(ops_df, legs_df)
 
-    page = st.sidebar.radio(
-        "Página",
-        [
-            "Dashboard General",
-            "Tiempo y Sesiones",
-            "Motor de Reversiones",
-            "Simulador Diario",
-            "Laboratorio de Parámetros",
-            "Risk Killers",
-            "Explorador de Operaciones",
-        ],
-    )
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Datos")
+    c_loaded, c_filtered = st.sidebar.columns(2)
+    with c_loaded:
+        st.caption("Cargado")
+        st.metric("Ops", len(ops_df))
+        st.metric("Piernas", len(legs_df))
+    with c_filtered:
+        st.caption("Filtrado")
+        st.metric("Ops", len(ops_filtered))
+        st.metric("Piernas", len(legs_filtered))
 
     if page == "Dashboard General":
         render_dashboard_general(ops_filtered, legs_filtered)
