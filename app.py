@@ -3346,15 +3346,19 @@ def render_risk_killers(ops_df: pd.DataFrame):
 
 def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.header("Explorador de Operaciones")
-    section_note("Esta página responde: ¿qué pasó exactamente dentro de una operación?")
+    section_note(
+        "Esta página responde: ¿qué pasó exactamente dentro de una operación? "
+        "Aquí revisamos la historia completa: resultado, reversals, contratos, caída máxima y cada pierna."
+    )
     show_help(
         "Explorador de Operaciones",
-        "Detalle técnico por operación. Aquí sí vemos piernas, contratos, PnL acumulado y el resultado simulado con máximo reversal permitido.",
+        "Detalle por operación. Sirve para entender por qué una operación fue limpia, peligrosa o directamente mala.",
         [
-            "¿Dónde entró y salió cada pierna?",
-            "¿Cómo evolucionó el PnL acumulado?",
-            "¿Cuántos contratos se usaron?",
-            "¿Qué habría pasado con un máximo reversal diferente?",
+            "¿La operación ganó o perdió de forma limpia?",
+            "¿Cuánto sufrió antes de cerrar?",
+            "¿Qué pierna cambió el resultado?",
+            "¿Cuántos contratos se usaron y en qué reversal?",
+            "¿Cómo se compara contra operaciones similares de la misma sesión/hora?",
         ],
     )
 
@@ -3364,21 +3368,22 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
     filtered = ops_df.copy()
 
-    st.subheader("Filtros de búsqueda")
+    st.subheader("1. Buscar operación")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         search_id = st.text_input("Buscar operation_id", "")
     with c2:
-        only_losers = st.checkbox("Solo operaciones perdedoras", value=False)
+        only_losers = st.checkbox("Solo perdedoras", value=False)
     with c3:
         min_reversal = st.number_input("Reversal mínimo", min_value=0, value=0, step=1)
     with c4:
         max_real_rev = int(filtered["reversal_count"].fillna(0).max()) if "reversal_count" in filtered.columns else 0
         max_reversal_permitido = st.selectbox(
-            "Máximo reversal permitido",
+            "Reversal máximo simulado",
             options=list(range(0, max_real_rev + 1)),
             index=max_real_rev,
             key="explorer_max_reversal_permitido",
+            help="Sirve para ver qué habría pasado si el bot se detenía en ese reversal. Si una operación llegó más profundo, se corta antes.",
         )
 
     if search_id.strip():
@@ -3393,65 +3398,308 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
     filtered_sim = aplicar_cap_reversal(filtered, legs_df, max_reversal_permitido)
 
-    c = st.columns(3)
-    with c[0]: card("PnL Real Visible", fmt_money(filtered_sim["sequence_net_pnl_currency"].sum()))
-    with c[1]: card("PnL Simulado Visible", fmt_money(filtered_sim["sequence_net_pnl_simulado"].sum()))
-    with c[2]: card("Ops Cortadas", str(int(filtered_sim["cap_aplicado"].sum())))
+    visible_real_pnl = filtered_sim["sequence_net_pnl_currency"].sum()
+    visible_sim_pnl = filtered_sim["sequence_net_pnl_simulado"].sum()
+    visible_cut = int(filtered_sim["cap_aplicado"].sum()) if "cap_aplicado" in filtered_sim.columns else 0
+    visible_ops = len(filtered_sim)
 
-    list_cols = [
-        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
-        "sequence_net_pnl_simulado", "reversal_count", "reversal_count_simulado",
-        "operation_max_drawdown_currency", "operation_max_runup_currency",
-        "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "sequence_end_reason_simulado", "config_key",
-    ]
-    list_cols = [c for c in list_cols if c in filtered_sim.columns]
-    st.dataframe(filtered_sim[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+    c = st.columns(4)
+    with c[0]: card("Operaciones visibles", f"{visible_ops}")
+    with c[1]: card("PnL real visible", fmt_money(visible_real_pnl))
+    with c[2]: card("PnL simulado visible", fmt_money(visible_sim_pnl))
+    with c[3]: card("Ops cortadas", str(visible_cut))
 
+    st.subheader("2. Mapa de operaciones visibles")
+    section_note("Este gráfico ayuda a encontrar rápido las operaciones grandes. Puedes pasar el mouse sobre cada punto para ver los detalles.")
+
+    visible_chart = filtered_sim.copy().sort_values("sequence_started_at")
+    if go is not None and not visible_chart.empty:
+        visible_chart["op_label"] = visible_chart["operation_id"].astype(str)
+        visible_chart["resultado"] = np.where(visible_chart["sequence_net_pnl_currency"] >= 0, "Ganadora", "Perdedora")
+        custom_cols = [
+            "operation_id", "month", "trade_day", "sequence_net_pnl_currency", "sequence_net_pnl_simulado",
+            "reversal_count", "operation_max_drawdown_currency", "max_contracts_used", "sesion", "hora_inicio",
+            "sequence_end_reason", "resultado",
+        ]
+        custom_cols = [col for col in custom_cols if col in visible_chart.columns]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=visible_chart["sequence_started_at"],
+            y=visible_chart["sequence_net_pnl_currency"],
+            customdata=visible_chart[custom_cols].to_numpy(),
+            marker_color=np.where(visible_chart["sequence_net_pnl_currency"] >= 0, "#2E86C1", "#C0392B"),
+            hovertemplate=(
+                "Operación: %{customdata[0]}<br>"
+                "Mes: %{customdata[1]}<br>"
+                "Día: %{customdata[2]}<br>"
+                "Resultado: %{customdata[11]}<br>"
+                "PnL real: %{customdata[3]:,.2f}<br>"
+                "PnL simulado: %{customdata[4]:,.2f}<br>"
+                "Reversals: %{customdata[5]}<br>"
+                "Caída máx: %{customdata[6]:,.2f}<br>"
+                "Máx contratos: %{customdata[7]}<br>"
+                "Sesión: %{customdata[8]}<br>"
+                "Hora: %{customdata[9]}<br>"
+                "Cierre: %{customdata[10]}<extra></extra>"
+            ),
+            name="Operaciones",
+        ))
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title="Resultado por operación visible",
+            xaxis_title="Tiempo",
+            yaxis_title="PnL",
+            height=430,
+            hovermode="closest",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        list_cols = [
+            "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
+            "sequence_net_pnl_simulado", "reversal_count", "reversal_count_simulado",
+            "operation_max_drawdown_currency", "operation_max_runup_currency",
+            "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "sequence_end_reason_simulado", "config_key",
+        ]
+        list_cols = [c for c in list_cols if c in filtered_sim.columns]
+        st.dataframe(filtered_sim[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+
+    with st.expander("Ver tabla de operaciones visibles", expanded=False):
+        list_cols = [
+            "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
+            "sequence_net_pnl_simulado", "reversal_count", "reversal_count_simulado",
+            "operation_max_drawdown_currency", "operation_max_runup_currency",
+            "base_contracts", "max_contracts_used", "sesion", "hora_inicio", "sequence_end_reason", "sequence_end_reason_simulado", "config_key",
+        ]
+        list_cols = [c for c in list_cols if c in filtered_sim.columns]
+        st.dataframe(filtered_sim[list_cols].sort_values("sequence_started_at", ascending=False), use_container_width=True)
+
+    st.subheader("3. Seleccionar operación")
     op_ids = filtered_sim.sort_values("sequence_started_at", ascending=False)["operation_id"].astype(str).tolist()
-    selected = st.selectbox("Seleccionar operación", op_ids)
+    selected = st.selectbox("Operación", op_ids)
     if not selected:
         return
 
     op_row = filtered_sim[filtered_sim["operation_id"].astype(str) == selected]
-    st.subheader("Resumen de la operación")
-    st.dataframe(op_row, use_container_width=True)
+    if op_row.empty:
+        return
+    row = op_row.iloc[0]
 
-    st.subheader("Piernas de la operación")
     if legs_df.empty:
         st.info("No hay piernas cargadas para esta operación.")
         return
 
-    legs_op = legs_df[legs_df["operation_id"].astype(str) == selected].sort_values("leg_index")
+    legs_op = legs_df[legs_df["operation_id"].astype(str) == selected].sort_values("leg_index").copy()
     if legs_op.empty:
         st.info("No se encontraron piernas para esta operación.")
         return
 
-    st.dataframe(legs_op, use_container_width=True)
+    start_time = legs_op["entry_time"].min() if "entry_time" in legs_op.columns else row.get("sequence_started_at")
+    end_time = legs_op["exit_time"].max() if "exit_time" in legs_op.columns else row.get("sequence_ended_at")
+    duration_txt = "-"
+    if pd.notna(start_time) and pd.notna(end_time):
+        minutes = (pd.to_datetime(end_time) - pd.to_datetime(start_time)).total_seconds() / 60
+        duration_txt = f"{minutes:.1f} min"
 
-    if "cumulative_sequence_pnl_after_leg" in legs_op.columns:
+    st.subheader("4. Resumen claro de la operación")
+    c = st.columns(5)
+    with c[0]: card("Resultado real", fmt_money(row.get("sequence_net_pnl_currency", np.nan)))
+    with c[1]: card("Resultado simulado", fmt_money(row.get("sequence_net_pnl_simulado", np.nan)))
+    with c[2]: card("Caída máxima", fmt_money(row.get("operation_max_drawdown_currency", np.nan)))
+    with c[3]: card("Reversals", f"{int(row.get('reversal_count', 0)) if pd.notna(row.get('reversal_count', np.nan)) else 0}")
+    with c[4]: card("Duración", duration_txt)
+
+    c = st.columns(5)
+    with c[0]: card("Máx contratos", "-" if pd.isna(row.get("max_contracts_used", np.nan)) else f"{row.get('max_contracts_used'):.0f}")
+    with c[1]: card("Sesión", str(row.get("sesion", "-")))
+    with c[2]: card("Hora", "-" if pd.isna(row.get("hora_inicio", np.nan)) else f"{int(row.get('hora_inicio'))}:00")
+    with c[3]: card("Cierre real", str(row.get("sequence_end_reason", "-")))
+    with c[4]: card("Cierre simulado", str(row.get("sequence_end_reason_simulado", "-")))
+
+    # Simple human reading
+    pnl_real = float(row.get("sequence_net_pnl_currency", 0.0) or 0.0)
+    dd_real = float(row.get("operation_max_drawdown_currency", 0.0) or 0.0)
+    rev_real = int(row.get("reversal_count", 0) or 0)
+    if pnl_real > 0 and dd_real > abs(pnl_real) * 2:
+        section_note("Lectura rápida: esta operación terminó positiva, pero sufrió bastante antes de cerrar. Es una win peligrosa.")
+    elif pnl_real < 0 and rev_real >= 2:
+        section_note("Lectura rápida: esta pérdida usó varios reversals. Conviene revisar si el recovery estaba aumentando demasiado el riesgo.")
+    elif pnl_real > 0:
+        section_note("Lectura rápida: esta operación terminó positiva. Revisa abajo si fue una win limpia o si necesitó mucha exposición.")
+    else:
+        section_note("Lectura rápida: esta operación terminó negativa. Revisa qué pierna abrió el daño y si el cap de reversal habría reducido la pérdida.")
+
+    st.subheader("5. Historia de la operación por pierna")
+    if "realized_pnl_currency" not in legs_op.columns:
+        legs_op["realized_pnl_currency"] = np.nan
+    if "cumulative_sequence_pnl_after_leg" not in legs_op.columns:
+        legs_op["cumulative_sequence_pnl_after_leg"] = legs_op["realized_pnl_currency"].cumsum()
+
+    legs_op["leg_label"] = "Pierna " + legs_op["leg_index"].astype(str)
+    legs_op["pnl_pierna"] = pd.to_numeric(legs_op["realized_pnl_currency"], errors="coerce").fillna(0.0)
+    legs_op["pnl_acumulado"] = pd.to_numeric(legs_op["cumulative_sequence_pnl_after_leg"], errors="coerce")
+    legs_op["contratos"] = pd.to_numeric(legs_op.get("entry_qty", np.nan), errors="coerce")
+
+    if go is not None:
+        custom_cols = [
+            "leg_index", "leg_type", "reversal_number", "direction", "entry_time", "exit_time",
+            "entry_price_avg", "exit_price_avg", "contratos", "exit_reason", "exit_result_type",
+            "pnl_pierna", "pnl_acumulado",
+        ]
+        custom_cols = [c for c in custom_cols if c in legs_op.columns]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=legs_op["leg_label"],
+            y=legs_op["pnl_pierna"],
+            customdata=legs_op[custom_cols].to_numpy(),
+            marker_color=np.where(legs_op["pnl_pierna"] >= 0, "#2E86C1", "#C0392B"),
+            name="PnL de la pierna",
+            hovertemplate=(
+                "Pierna: %{customdata[0]}<br>"
+                "Tipo: %{customdata[1]}<br>"
+                "Reversal: %{customdata[2]}<br>"
+                "Dirección: %{customdata[3]}<br>"
+                "Entrada: %{customdata[4]}<br>"
+                "Salida: %{customdata[5]}<br>"
+                "Precio entrada: %{customdata[6]:,.2f}<br>"
+                "Precio salida: %{customdata[7]:,.2f}<br>"
+                "Contratos: %{customdata[8]}<br>"
+                "Razón salida: %{customdata[9]}<br>"
+                "Tipo resultado: %{customdata[10]}<br>"
+                "PnL pierna: %{customdata[11]:,.2f}<br>"
+                "PnL acumulado: %{customdata[12]:,.2f}<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=legs_op["leg_label"],
+            y=legs_op["pnl_acumulado"],
+            mode="lines+markers",
+            name="PnL acumulado",
+            hovertemplate="%{x}<br>PnL acumulado: %{y:,.2f}<extra></extra>",
+        ))
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title="Historia del PnL por pierna",
+            xaxis_title="Pierna",
+            yaxis_title="PnL",
+            height=430,
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(
+            x=legs_op["leg_label"],
+            y=legs_op["contratos"],
+            customdata=legs_op[custom_cols].to_numpy(),
+            name="Contratos",
+            hovertemplate=(
+                "Pierna: %{customdata[0]}<br>"
+                "Reversal: %{customdata[2]}<br>"
+                "Dirección: %{customdata[3]}<br>"
+                "Contratos: %{customdata[8]}<br>"
+                "PnL pierna: %{customdata[11]:,.2f}<br>"
+                "PnL acumulado: %{customdata[12]:,.2f}<extra></extra>"
+            ),
+        ))
+        fig2.update_layout(title="Contratos usados por pierna", xaxis_title="Pierna", yaxis_title="Contratos", height=360)
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
         fig, ax = plt.subplots(figsize=(9, 4))
-        ax.plot(legs_op["leg_index"].astype(str), legs_op["cumulative_sequence_pnl_after_leg"], marker="o")
-        ax.set_title("PnL Acumulado por Pierna")
+        ax.plot(legs_op["leg_label"], legs_op["pnl_acumulado"], marker="o")
+        ax.bar(legs_op["leg_label"], legs_op["pnl_pierna"], alpha=0.4)
+        ax.set_title("Historia del PnL por pierna")
         ax.set_xlabel("Pierna")
-        ax.set_ylabel("PnL Acumulado")
+        ax.set_ylabel("PnL")
         st.pyplot(fig)
 
-    if "entry_qty" in legs_op.columns:
-        fig, ax = plt.subplots(figsize=(9, 4))
-        ax.bar(legs_op["leg_index"].astype(str), legs_op["entry_qty"])
-        ax.set_title("Contratos por Pierna")
-        ax.set_xlabel("Pierna")
-        ax.set_ylabel("Contratos")
-        st.pyplot(fig)
+    with st.expander("Ver piernas en tabla", expanded=False):
+        display_legs = [
+            "leg_index", "leg_type", "reversal_number", "direction", "entry_time", "entry_price_avg", "entry_qty",
+            "initial_stop_price", "initial_target_price", "exit_time", "exit_price_avg", "exit_reason",
+            "exit_result_type", "realized_pnl_currency", "cumulative_sequence_pnl_after_leg",
+            "sequence_loss_before_entry", "smart_recovery_qty_computed", "auto_be_activated", "trailing_activated",
+        ]
+        display_legs = [c for c in display_legs if c in legs_op.columns]
+        st.dataframe(legs_op[display_legs], use_container_width=True)
 
-    row = op_row.iloc[0]
+    st.subheader("6. Comparación con operaciones similares")
+    section_note("Esto ayuda a ver si la operación fue normal para su contexto o si fue una excepción.")
+
+    comp_rows = []
+    selected_pnl = float(row.get("sequence_net_pnl_currency", 0.0) or 0.0)
+    selected_dd = float(row.get("operation_max_drawdown_currency", 0.0) or 0.0)
+
+    def add_context(label: str, df: pd.DataFrame):
+        if df.empty:
+            return
+        comp_rows.append({
+            "contexto": label,
+            "operaciones": len(df),
+            "pnl_promedio": df["sequence_net_pnl_currency"].mean(),
+            "drawdown_promedio": df["operation_max_drawdown_currency"].mean() if "operation_max_drawdown_currency" in df.columns else np.nan,
+            "win_rate": (df["sequence_net_pnl_currency"] > 0).mean() * 100,
+            "peor_operacion": df["sequence_net_pnl_currency"].min(),
+            "mejor_operacion": df["sequence_net_pnl_currency"].max(),
+        })
+
+    add_context("Operación seleccionada", pd.DataFrame([row]))
+    if "sesion" in filtered_sim.columns:
+        add_context(f"Misma sesión: {row.get('sesion')}", filtered_sim[filtered_sim["sesion"].astype(str) == str(row.get("sesion"))])
+    if "hora_inicio" in filtered_sim.columns and pd.notna(row.get("hora_inicio", np.nan)):
+        add_context(f"Misma hora: {int(row.get('hora_inicio'))}:00", filtered_sim[filtered_sim["hora_inicio"] == row.get("hora_inicio")])
+    if "reversal_count" in filtered_sim.columns and pd.notna(row.get("reversal_count", np.nan)):
+        add_context(f"Mismos reversals: {int(row.get('reversal_count'))}", filtered_sim[filtered_sim["reversal_count"] == row.get("reversal_count")])
+
+    comp_df = pd.DataFrame(comp_rows)
+    if not comp_df.empty:
+        if go is not None:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=comp_df["contexto"],
+                y=comp_df["pnl_promedio"],
+                customdata=comp_df[["contexto", "operaciones", "pnl_promedio", "drawdown_promedio", "win_rate", "peor_operacion", "mejor_operacion"]].to_numpy(),
+                hovertemplate=(
+                    "Contexto: %{customdata[0]}<br>"
+                    "Operaciones: %{customdata[1]}<br>"
+                    "PnL promedio: %{customdata[2]:,.2f}<br>"
+                    "Caída prom.: %{customdata[3]:,.2f}<br>"
+                    "Win rate: %{customdata[4]:.1f}%<br>"
+                    "Peor op: %{customdata[5]:,.2f}<br>"
+                    "Mejor op: %{customdata[6]:,.2f}<extra></extra>"
+                ),
+                name="PnL promedio",
+            ))
+            fig.add_hline(y=0, line_width=1)
+            fig.update_layout(title="La operación contra su contexto", xaxis_title="Contexto", yaxis_title="PnL promedio", height=380)
+            st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Ver comparación en tabla", expanded=False):
+            st.dataframe(comp_df, use_container_width=True)
+
+    # Nearby/similar operations list
+    similar = filtered_sim.copy()
+    if "sesion" in similar.columns:
+        similar = similar[similar["sesion"].astype(str) == str(row.get("sesion"))]
+    if "hora_inicio" in similar.columns and pd.notna(row.get("hora_inicio", np.nan)):
+        similar = similar[similar["hora_inicio"] == row.get("hora_inicio")]
+    similar = similar[similar["operation_id"].astype(str) != str(selected)]
+    similar_cols = [
+        "month", "trade_day", "operation_id", "sequence_started_at", "sequence_net_pnl_currency",
+        "reversal_count", "operation_max_drawdown_currency", "max_contracts_used", "sequence_end_reason",
+    ]
+    similar_cols = [c for c in similar_cols if c in similar.columns]
+    with st.expander("Ver operaciones parecidas misma sesión/hora", expanded=False):
+        if similar.empty:
+            st.info("No hay operaciones parecidas con los filtros actuales.")
+        else:
+            st.dataframe(similar[similar_cols].sort_values("sequence_started_at", ascending=False).head(30), use_container_width=True)
+
     lines = [
         f"PnL real: {fmt_money(row['sequence_net_pnl_currency'])}.",
-        f"PnL simulado con cap {max_reversal_permitido}: {fmt_money(row['sequence_net_pnl_simulado'])}.",
+        f"PnL simulado con reversal máximo {max_reversal_permitido}: {fmt_money(row['sequence_net_pnl_simulado'])}.",
         f"Reversals reales: {int(row['reversal_count']) if pd.notna(row['reversal_count']) else 0}.",
         f"Reversals simulados: {int(row['reversal_count_simulado']) if pd.notna(row['reversal_count_simulado']) else 0}.",
-        f"Drawdown máximo: {fmt_money(row['operation_max_drawdown_currency'])}.",
-        f"Máximo contratos usados: {fmt_money(row['max_contracts_used'])}.",
+        f"Caída máxima: {fmt_money(row['operation_max_drawdown_currency'])}.",
+        f"Máximo contratos usados: {'-' if pd.isna(row.get('max_contracts_used', np.nan)) else f'{row.get('max_contracts_used'):.0f}'}.",
         f"Razón de cierre real: {row['sequence_end_reason']}.",
         f"Razón de cierre simulada: {row['sequence_end_reason_simulado']}.",
     ]
