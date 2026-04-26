@@ -2778,8 +2778,8 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.markdown("---")
     st.subheader("6. Rotación de cuentas / avanzado")
     section_note(
-        "Esta sección prueba una idea práctica: comprar varias cuentas y repartir los ciclos entre ellas. "
-        "Un ciclo empieza con una pierna, acumula PnL hasta tocar meta o pérdida. Después, ese ciclo se aplica a un grupo de cuentas y la rotación pasa al siguiente grupo disponible."
+        "Esta sección prueba una idea práctica: comprar varias cuentas y repartir los resultados entre ellas. "
+        "Primero el bot se divide en ciclos de trading. Luego cada ciclo se copia a un grupo de cuentas. Cuando ese ciclo termina, el siguiente ciclo pasa al próximo grupo."
     )
 
     show_rotation = st.checkbox("Mostrar rotación de cuentas", value=False)
@@ -2830,14 +2830,15 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             contract_multiplier=contract_multiplier,
         )
 
-        st.markdown("**Resultado de ciclos antes de rotar cuentas**")
+        st.markdown("**1. Resultado del bot dividido en ciclos**")
+        st.caption("Esto todavía no es el resultado de las cuentas. Aquí solo vemos cómo queda el bot cuando lo partimos en ciclos: cada ciclo termina al tocar meta, pérdida o fin del día operativo. Después esos ciclos se reparten entre las cuentas.")
         c = st.columns(4)
-        with c[0]: card("PnL de los ciclos", fmt_money(sets_m.get("total_pnl", np.nan)))
-        with c[1]: card("Ciclos con Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
-        with c[2]: card("Ciclos con Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
-        with c[3]: card("Piernas por ciclo", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
+        with c[0]: card("PnL si operara una sola cuenta", fmt_money(sets_m.get("total_pnl", np.nan)))
+        with c[1]: card("Ciclos que llegan a meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
+        with c[2]: card("Ciclos que llegan a pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
+        with c[3]: card("Entradas promedio por ciclo", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
 
-        st.markdown("**Reglas de las cuentas**")
+        st.markdown("**2. Reglas de las cuentas**")
         a1, a2, a3, a4 = st.columns(4)
         total_accounts = a1.number_input("Cantidad total de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
         accounts_per_set = a2.number_input("Cuentas por grupo", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
@@ -2858,12 +2859,14 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         )
 
         a5, a6 = st.columns(2)
-        account_profit_target = a5.number_input("Meta por cuenta opcional", min_value=0.0, value=0.0, step=100.0, key="account_profit_target")
+        account_profit_target = a5.number_input("Dejar de usar una cuenta al llegar a esta ganancia", min_value=0.0, value=0.0, step=100.0, key="account_profit_target", help="Opcional. Si lo dejas en 0, la cuenta sigue operando mientras no se queme. Si pones 3000, por ejemplo, cuando una cuenta llegue a +3000 se marca como Objetivo y ya no se usa más.")
         flat_at_account_loss = a6.checkbox(
             "Cerrar exacto en caída/meta de cuenta",
             value=True,
             help="ON: si la cuenta supera la caída máxima permitida, se registra exactamente en el nivel de quema. OFF: usa el cierre real del ciclo.",
         )
+
+        st.caption("La ganancia objetivo por cuenta es opcional. Déjala en 0 si no quieres sacar cuentas por profit target; en ese caso solo salen si se queman por caída máxima.")
 
         accounts_df, rotation_timeline, rotation_m = simulate_account_rotation_from_sets(
             sets_df,
@@ -2875,7 +2878,7 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             flat_at_account_loss=flat_at_account_loss,
         )
 
-        st.markdown("**Resumen de rotación**")
+        st.markdown("**3. Resultado después de repartir los ciclos entre cuentas**")
         r1 = st.columns(4)
         with r1[0]: card("PnL Bruto", fmt_money(rotation_m.get("gross_pnl", np.nan)))
         with r1[1]: card("Costo Total", fmt_money(rotation_m.get("total_cost", np.nan)))
