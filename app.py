@@ -1500,70 +1500,10 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             )
 
     st.markdown("---")
-    st.subheader("Simulación rápida por máximo reversal permitido")
     section_note(
-        "Este control cambia el máximo reversal permitido y recalcula el PnL como si el bot se hubiera detenido en ese reversal. "
-        "El cálculo usa las piernas de la operación para tomar el PnL acumulado hasta el reversal seleccionado."
+        "El análisis de máximo reversal permitido se movió al Motor de Reversiones para evitar duplicados en el Dashboard. "
+        "Aquí dejamos solo la salud general, la cuenta, el resultado mensual y el resultado diario."
     )
-
-    max_real_rev = int(ops_df["reversal_count"].fillna(0).max()) if "reversal_count" in ops_df.columns and not ops_df.empty else 0
-    dashboard_max_reversal = st.selectbox(
-        "Máximo reversal permitido",
-        options=list(range(0, max_real_rev + 1)),
-        index=max_real_rev,
-        key="dashboard_max_reversal_permitido",
-        help="Ejemplo: si eliges 2, las operaciones que llegaron a reversal 3 o más se simulan cortadas después del reversal 2.",
-    )
-
-    dashboard_sim, rev_metrics = simulated_reversal_metrics(ops_df, legs_df, dashboard_max_reversal)
-
-    c = st.columns(4)
-    with c[0]: card("PnL Real", fmt_money(rev_metrics.get("real_pnl", np.nan)))
-    with c[1]: card("PnL Reversal Seleccionado", fmt_money(rev_metrics.get("sim_pnl", np.nan)))
-    with c[2]: card("Diferencia PnL", fmt_money(rev_metrics.get("pnl_diff", np.nan)))
-    with c[3]: card("Ops Cortadas", str(rev_metrics.get("ops_cortadas", 0)))
-
-    c = st.columns(4)
-    with c[0]: card("Profit Factor Real", "-" if pd.isna(rev_metrics.get("real_pf", np.nan)) else f"{rev_metrics.get('real_pf'):.2f}")
-    with c[1]: card("PF Reversal Seleccionado", "-" if pd.isna(rev_metrics.get("sim_pf", np.nan)) else f"{rev_metrics.get('sim_pf'):.2f}")
-    with c[2]: card("Max DD Real", fmt_money(rev_metrics.get("real_max_dd", np.nan)))
-    with c[3]: card("Max DD Seleccionado", fmt_money(rev_metrics.get("sim_max_dd", np.nan)))
-
-    c = st.columns(4)
-    with c[0]: card("Peor Op Real", fmt_money(rev_metrics.get("worst_real_op", np.nan)))
-    with c[1]: card("Peor Op Seleccionada", fmt_money(rev_metrics.get("worst_sim_op", np.nan)))
-    with c[2]: card("Max Reversal Real", str(max_real_rev))
-    with c[3]: card("Resultados Cambiados", str(rev_metrics.get("ops_resultado_cambiado", 0)))
-
-    section_note(
-        "Ops Cortadas = operaciones que en la realidad pasaron del reversal seleccionado. "
-        "Ejemplo: si eliges 3 y una operación real llegó a 4, se corta después de cerrar el reversal 3. "
-        "Si esa operación ganó en reversal 4, en esta simulación normalmente queda como pérdida en reversal 3."
-    )
-
-    sim_month = monthly_simulated_reversal_summary(dashboard_sim)
-    if not sim_month.empty:
-        st.markdown("**Impacto mensual del reversal seleccionado**")
-        section_note(
-            "Compara el resultado real contra lo que habría pasado si el bot se detenía en el reversal seleccionado. "
-            "Pasa el mouse sobre las barras para ver PnL, profit factor, caída máxima y operaciones cortadas."
-        )
-        render_reversal_month_impact_chart(sim_month, dashboard_max_reversal)
-        with st.expander("Ver tabla mensual detallada", expanded=False):
-            st.dataframe(sim_month, use_container_width=True)
-
-    changed_dashboard = dashboard_sim[dashboard_sim["cap_aplicado"] == True].copy() if "cap_aplicado" in dashboard_sim.columns else pd.DataFrame()
-    if not changed_dashboard.empty:
-        changed_dashboard["diferencia"] = changed_dashboard["sequence_net_pnl_simulado"] - changed_dashboard["sequence_net_pnl_currency"]
-        show_cols = [
-            "month", "trade_day", "operation_id", "sequence_started_at", "simulated_stop_time",
-            "reversal_count", "reversal_count_simulado",
-            "sequence_net_pnl_currency", "sequence_net_pnl_simulado", "diferencia",
-            "operation_max_drawdown_currency", "base_contracts", "sesion", "hora_inicio", "sim_detail",
-        ]
-        show_cols = [c for c in show_cols if c in changed_dashboard.columns]
-        st.markdown("**Operaciones cortadas por el reversal seleccionado**")
-        st.dataframe(changed_dashboard[show_cols].sort_values("diferencia"), use_container_width=True)
 
     st.markdown("---")
     st.subheader("Resultado por Mes")
@@ -1940,7 +1880,13 @@ def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     month_sim = monthly_simulated_reversal_summary(sim_df)
     if not month_sim.empty:
         st.markdown("**Impacto mensual del reversal seleccionado**")
-        st.dataframe(month_sim, use_container_width=True)
+        section_note(
+            "Este gráfico compara el PnL real contra el PnL si el bot se hubiera detenido en el reversal seleccionado. "
+            "Pasa el mouse sobre cada barra para ver Profit Factor, caída máxima, operaciones cortadas y resultados cambiados."
+        )
+        render_reversal_month_impact_chart(month_sim, max_reversal_permitido)
+        with st.expander("Ver tabla mensual detallada", expanded=False):
+            st.dataframe(month_sim, use_container_width=True)
 
     detail_cols = [
         "month", "trade_day", "operation_id", "sequence_started_at", "reversal_count", "reversal_count_simulado",
