@@ -1135,14 +1135,21 @@ def simulate_account_rotation_from_sets(
         for idx in selected:
             acc = accounts[idx]
             before = acc["gross_pnl"]
+            peak_before = acc["peak_pnl"]
             after_raw = before + set_result
             after = after_raw
             status_before = acc["status"]
             event_status = "Viva"
+            burn_level = peak_before - account_max_loss if account_max_loss > 0 else np.nan
+            raw_drawdown_from_peak = after_raw - peak_before
 
-            if account_max_loss > 0 and after_raw <= -account_max_loss:
+            # IMPORTANT:
+            # Account max loss is treated as max account drawdown from the best point,
+            # not only total loss from zero.
+            # Example: peak +1,800 and limit 1,500 => burn level +300.
+            if account_max_loss > 0 and raw_drawdown_from_peak <= -account_max_loss:
                 event_status = "Quemada"
-                after = -account_max_loss if flat_at_account_loss else after_raw
+                after = burn_level if flat_at_account_loss else after_raw
                 acc["status"] = "Quemada"
             elif account_profit_target > 0 and after_raw >= account_profit_target:
                 event_status = "Objetivo"
@@ -1169,7 +1176,11 @@ def simulate_account_rotation_from_sets(
                 "set_result_original": set_result,
                 "set_result_applied": applied,
                 "account_pnl_before": before,
+                "account_peak_before": peak_before,
+                "account_burn_level": burn_level,
+                "account_pnl_after_raw": after_raw,
                 "account_pnl_after": acc["gross_pnl"],
+                "drawdown_from_peak_raw": raw_drawdown_from_peak,
                 "account_status_before": status_before,
                 "account_status_after": acc["status"],
                 "event_status": event_status,
@@ -2709,19 +2720,27 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         total_accounts = a1.number_input("Cantidad total de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
         accounts_per_set = a2.number_input("Cuentas operando a la vez", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
         account_cost = a3.number_input("Costo por cuenta", min_value=0.0, value=150.0, step=25.0, key="account_cost")
-        account_max_loss = a4.number_input("Pérdida máxima por cuenta", min_value=1.0, value=2500.0, step=100.0, key="account_max_loss")
+        account_max_loss = a4.number_input(
+            "Caída máxima por cuenta",
+            min_value=1.0,
+            value=2500.0,
+            step=100.0,
+            key="account_max_loss",
+            help="Se mide desde el mejor punto alcanzado por esa cuenta. Ejemplo: si una cuenta llega a +1,800 y luego baja a +200, la caída fue -1,600. Con límite 1,500, esa cuenta se marca como quemada.",
+        )
 
         st.caption(
             f"Rotación usada: cada ciclo se aplica a {int(accounts_per_set)} cuenta(s) viva(s). "
-            "Después, el siguiente ciclo pasa a las siguientes cuentas disponibles."
+            "Después, el siguiente ciclo pasa a las siguientes cuentas disponibles. "
+            "La cuenta se quema si cae desde su mejor punto más de la caída máxima configurada."
         )
 
         a5, a6 = st.columns(2)
         account_profit_target = a5.number_input("Meta por cuenta opcional", min_value=0.0, value=0.0, step=100.0, key="account_profit_target")
         flat_at_account_loss = a6.checkbox(
-            "Cerrar exacto en pérdida/meta de cuenta",
+            "Cerrar exacto en caída/meta de cuenta",
             value=True,
-            help="ON: si la cuenta cae por debajo del límite, se registra exactamente en el límite. OFF: usa el cierre real del set.",
+            help="ON: si la cuenta supera la caída máxima permitida, se registra exactamente en el nivel de quema. OFF: usa el cierre real del ciclo.",
         )
 
         accounts_df, rotation_timeline, rotation_m = simulate_account_rotation_from_sets(
