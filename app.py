@@ -3622,58 +3622,98 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         display_legs = [c for c in display_legs if c in legs_op.columns]
         st.dataframe(legs_op[display_legs], use_container_width=True)
 
-    st.subheader("6. Comparación con operaciones similares")
-    section_note("Esto ayuda a ver si la operación fue normal para su contexto o si fue una excepción.")
+    st.subheader("6. Comparación con trades parecidos")
+    section_note(
+        "Esta parte compara la operación seleccionada contra trades con condiciones parecidas. "
+        "La idea es responder: ¿este trade fue normal para este contexto o fue una excepción?"
+    )
 
-    comp_rows = []
     selected_pnl = float(row.get("sequence_net_pnl_currency", 0.0) or 0.0)
-    selected_dd = float(row.get("operation_max_drawdown_currency", 0.0) or 0.0)
 
-    def add_context(label: str, df: pd.DataFrame):
-        if df.empty:
-            return
-        comp_rows.append({
-            "contexto": label,
-            "operaciones": len(df),
-            "pnl_promedio": df["sequence_net_pnl_currency"].mean(),
-            "drawdown_promedio": df["operation_max_drawdown_currency"].mean() if "operation_max_drawdown_currency" in df.columns else np.nan,
-            "win_rate": (df["sequence_net_pnl_currency"] > 0).mean() * 100,
-            "peor_operacion": df["sequence_net_pnl_currency"].min(),
-            "mejor_operacion": df["sequence_net_pnl_currency"].max(),
-        })
+    similar = filtered_sim.copy()
+    similar_rules = []
 
-    add_context("Operación seleccionada", pd.DataFrame([row]))
-    if "sesion" in filtered_sim.columns:
-        add_context(f"Misma sesión: {row.get('sesion')}", filtered_sim[filtered_sim["sesion"].astype(str) == str(row.get("sesion"))])
-    if "hora_inicio" in filtered_sim.columns and pd.notna(row.get("hora_inicio", np.nan)):
-        add_context(f"Misma hora: {int(row.get('hora_inicio'))}:00", filtered_sim[filtered_sim["hora_inicio"] == row.get("hora_inicio")])
-    if "reversal_count" in filtered_sim.columns and pd.notna(row.get("reversal_count", np.nan)):
-        add_context(f"Mismos reversals: {int(row.get('reversal_count'))}", filtered_sim[filtered_sim["reversal_count"] == row.get("reversal_count")])
+    if "sesion" in similar.columns and pd.notna(row.get("sesion")):
+        similar = similar[similar["sesion"].astype(str) == str(row.get("sesion"))]
+        similar_rules.append(f"misma sesión: {row.get('sesion')}")
 
-    comp_df = pd.DataFrame(comp_rows)
-    if not comp_df.empty:
-        if go is not None:
+    if "hora_inicio" in similar.columns and pd.notna(row.get("hora_inicio", np.nan)):
+        similar = similar[similar["hora_inicio"] == row.get("hora_inicio")]
+        similar_rules.append(f"misma hora: {int(row.get('hora_inicio'))}:00")
+
+    if "reversal_count" in similar.columns and pd.notna(row.get("reversal_count", np.nan)):
+        similar = similar[similar["reversal_count"] == row.get("reversal_count")]
+        similar_rules.append(f"mismos reversals: {int(row.get('reversal_count'))}")
+
+    if similar.empty:
+        st.info("No hay trades parecidos con los filtros actuales.")
+    else:
+        similar_pnl = similar["sequence_net_pnl_currency"].dropna()
+        avg_similar = similar_pnl.mean() if not similar_pnl.empty else np.nan
+        med_similar = similar_pnl.median() if not similar_pnl.empty else np.nan
+        worst_similar = similar_pnl.min() if not similar_pnl.empty else np.nan
+        best_similar = similar_pnl.max() if not similar_pnl.empty else np.nan
+
+        st.caption("Filtro usado: " + (" · ".join(similar_rules) if similar_rules else "mismos filtros visibles"))
+
+        c = st.columns(6)
+        with c[0]: card("Trade seleccionado", fmt_money(selected_pnl))
+        with c[1]: card("Promedio parecido", fmt_money(avg_similar))
+        with c[2]: card("Mediana parecida", fmt_money(med_similar))
+        with c[3]: card("Peor parecido", fmt_money(worst_similar))
+        with c[4]: card("Mejor parecido", fmt_money(best_similar))
+        with c[5]: card("Trades parecidos", f"{len(similar)}")
+
+        if go is not None and len(similar_pnl) > 0:
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=comp_df["contexto"],
-                y=comp_df["pnl_promedio"],
-                customdata=comp_df[["contexto", "operaciones", "pnl_promedio", "drawdown_promedio", "win_rate", "peor_operacion", "mejor_operacion"]].to_numpy(),
-                hovertemplate=(
-                    "Contexto: %{customdata[0]}<br>"
-                    "Operaciones: %{customdata[1]}<br>"
-                    "PnL promedio: %{customdata[2]:,.2f}<br>"
-                    "Caída prom.: %{customdata[3]:,.2f}<br>"
-                    "Win rate: %{customdata[4]:.1f}%<br>"
-                    "Peor op: %{customdata[5]:,.2f}<br>"
-                    "Mejor op: %{customdata[6]:,.2f}<extra></extra>"
-                ),
-                name="PnL promedio",
+            fig.add_trace(go.Histogram(
+                x=similar_pnl,
+                nbinsx=min(30, max(8, int(np.sqrt(len(similar_pnl)) * 2))),
+                name="Trades parecidos",
+                hovertemplate="Rango PnL: %{x}<br>Cantidad: %{y}<extra></extra>",
             ))
-            fig.add_hline(y=0, line_width=1)
-            fig.update_layout(title="La operación contra su contexto", xaxis_title="Contexto", yaxis_title="PnL promedio", height=380)
+            fig.add_vline(
+                x=selected_pnl,
+                line_width=3,
+                line_dash="dash",
+                annotation_text="Trade seleccionado",
+                annotation_position="top",
+            )
+            fig.add_vline(
+                x=avg_similar,
+                line_width=2,
+                line_dash="dot",
+                annotation_text="Promedio",
+                annotation_position="bottom",
+            )
+            fig.update_layout(
+                title="Distribución de trades parecidos",
+                xaxis_title="PnL del trade",
+                yaxis_title="Cantidad de trades",
+                height=400,
+                bargap=0.05,
+            )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.hist(similar_pnl, bins=min(30, max(8, int(np.sqrt(len(similar_pnl)) * 2))))
+            ax.axvline(selected_pnl, linestyle="--", linewidth=2)
+            ax.axvline(avg_similar, linestyle=":", linewidth=2)
+            ax.set_title("Distribución de trades parecidos")
+            ax.set_xlabel("PnL del trade")
+            ax.set_ylabel("Cantidad de trades")
+            st.pyplot(fig)
+
         with st.expander("Ver comparación en tabla", expanded=False):
-            st.dataframe(comp_df, use_container_width=True)
+            comparison_df = pd.DataFrame([
+                {"métrica": "Trade seleccionado", "valor": selected_pnl},
+                {"métrica": "Promedio trades parecidos", "valor": avg_similar},
+                {"métrica": "Mediana trades parecidos", "valor": med_similar},
+                {"métrica": "Peor trade parecido", "valor": worst_similar},
+                {"métrica": "Mejor trade parecido", "valor": best_similar},
+                {"métrica": "Cantidad trades parecidos", "valor": len(similar)},
+            ])
+            st.dataframe(comparison_df, use_container_width=True)
 
     # Nearby/similar operations list
     similar = filtered_sim.copy()
