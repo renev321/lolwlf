@@ -1501,35 +1501,9 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
     st.markdown("---")
     section_note(
-        "El análisis de máximo reversal permitido se movió al Motor de Reversiones para evitar duplicados en el Dashboard. "
-        "Aquí dejamos solo la salud general, la cuenta, el resultado mensual y el resultado diario."
+        "El Dashboard queda solo para salud general y caída máxima de la cuenta. "
+        "Los análisis por sesión, mes, día y hora están ahora organizados en Tiempo y Sesiones."
     )
-
-    st.markdown("---")
-    st.subheader("Resultado por Mes")
-    month_df = monthly_summary(ops_df)
-    if not month_df.empty:
-        render_monthly_result_chart(month_df)
-        with st.expander("Ver tabla mensual detallada", expanded=False):
-            st.dataframe(month_df, use_container_width=True)
-    else:
-        st.info("No hay datos mensuales para mostrar.")
-
-    st.subheader("Resultado por Día")
-    daily = daily_summary(ops_df)
-    st.dataframe(daily.sort_values("trade_day", ascending=False), use_container_width=True)
-
-    if not daily.empty:
-        render_clean_daily_pnl_chart(daily)
-
-    st.subheader("Mejores y Peores Días")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Peores días**")
-        st.dataframe(daily.sort_values("pnl_total", ascending=True).head(10), use_container_width=True)
-    with c2:
-        st.markdown("**Mejores días**")
-        st.dataframe(daily.sort_values("pnl_total", ascending=False).head(10), use_container_width=True)
 
     lines = []
     if m["pnl"] > 0:
@@ -1697,15 +1671,18 @@ def render_month_grouped_bar(
 
 def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     st.header("Tiempo y Sesiones")
-    section_note("Esta página responde: ¿cuándo debería operar el bot y qué horarios/sesiones conviene bloquear?")
+    section_note(
+        "Esta página concentra todo lo relacionado con tiempo: sesión, mes, día y hora. "
+        "La idea es ver primero el mapa grande y después bajar al detalle."
+    )
     show_help(
         "Tiempo y Sesiones",
-        "Análisis por día de semana, hora y sesión. Aquí buscamos edge temporal.",
+        "Análisis temporal del bot. Aquí buscamos qué momentos tienen edge y qué momentos conviene bloquear.",
         [
-            "¿Qué horas generan PnL positivo?",
-            "¿Qué sesiones son peligrosas?",
-            "¿Hay días de semana que dañan el resultado?",
-            "¿El mismo horario falla en varios meses?",
+            "¿Qué sesión es más fuerte o más peligrosa?",
+            "¿Qué mes está sosteniendo o dañando el resultado?",
+            "¿Qué días concretos fueron los peores/mejores?",
+            "¿Qué día de semana u hora debería evitarse?",
         ],
     )
 
@@ -1725,7 +1702,79 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     }
     session_order = ["Asia", "Londres", "NY Open", "NY Midday", "NY Late", "Fuera de Sesión", "Sin sesión"]
 
-    st.subheader("1. Día de semana")
+    # ========================================================
+    # 1. SESSION FIRST
+    # ========================================================
+    st.subheader("1. Sesión")
+    section_note("Primero vemos el mapa grande: qué región/sesión aporta o quita más dinero.")
+
+    by_session = aggregate_core(ops_df, ["sesion"])
+    by_session["_order"] = by_session["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
+    by_session = by_session.sort_values("_order").drop(columns=["_order"])
+    render_summary_bar_chart(
+        by_session,
+        x_col="sesion",
+        title="Resultado por sesión",
+        x_title="Sesión",
+        category_order=session_order,
+    )
+    with st.expander("Ver tabla por sesión", expanded=False):
+        st.dataframe(by_session, use_container_width=True)
+
+    if ops_df["month"].nunique() > 1:
+        st.markdown("**Sesión por mes**")
+        st.caption("Esto ayuda a ver si una sesión fue buena solo en un mes o si se mantiene fuerte en varios meses.")
+        session_month = aggregate_core(ops_df, ["month", "sesion"])
+        session_month["_order"] = session_month["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
+        session_month = session_month.sort_values(["_order", "month"]).drop(columns=["_order"])
+        render_month_grouped_bar(
+            session_month,
+            x_col="sesion",
+            title="Resultado por sesión y mes",
+            x_title="Sesión",
+            category_order=session_order,
+        )
+        with st.expander("Ver tabla de sesión por mes", expanded=False):
+            st.dataframe(session_month, use_container_width=True)
+
+    # ========================================================
+    # 2. MONTH
+    # ========================================================
+    st.subheader("2. Mes")
+    section_note("Después vemos si el resultado es estable entre meses o si un solo mes está escondiendo el riesgo.")
+
+    month_df = monthly_summary(ops_df)
+    if not month_df.empty:
+        render_monthly_result_chart(month_df)
+        with st.expander("Ver tabla mensual detallada", expanded=False):
+            st.dataframe(month_df, use_container_width=True)
+    else:
+        st.info("No hay datos mensuales para mostrar.")
+
+    # ========================================================
+    # 3. DAY
+    # ========================================================
+    st.subheader("3. Día")
+    section_note("Aquí bajamos al día concreto para detectar días que hicieron daño o días que sostuvieron el resultado.")
+
+    daily = daily_summary(ops_df)
+    if not daily.empty:
+        render_clean_daily_pnl_chart(daily)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Peores días**")
+            st.dataframe(daily.sort_values("pnl_total", ascending=True).head(10), use_container_width=True)
+        with c2:
+            st.markdown("**Mejores días**")
+            st.dataframe(daily.sort_values("pnl_total", ascending=False).head(10), use_container_width=True)
+
+        with st.expander("Ver tabla diaria completa", expanded=False):
+            st.dataframe(daily.sort_values("trade_day", ascending=False), use_container_width=True)
+    else:
+        st.info("No hay datos diarios para mostrar.")
+
+    st.markdown("**Día de semana**")
     weekday = aggregate_core(ops_df, ["dia_semana"])
     weekday["dia_semana_label"] = weekday["dia_semana"].map(weekday_labels).fillna(weekday["dia_semana"].astype(str))
     weekday["_order"] = weekday["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
@@ -1737,9 +1786,31 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
         x_title="Día",
         category_order=[weekday_labels[d] for d in weekday_order],
     )
-    st.dataframe(weekday.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
+    with st.expander("Ver tabla por día de semana", expanded=False):
+        st.dataframe(weekday.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
 
-    st.subheader("2. Hora")
+    if ops_df["month"].nunique() > 1:
+        st.markdown("**Día de semana por mes**")
+        weekday_month = aggregate_core(ops_df, ["month", "dia_semana"])
+        weekday_month["dia_semana_label"] = weekday_month["dia_semana"].map(weekday_labels).fillna(weekday_month["dia_semana"].astype(str))
+        weekday_month["_order"] = weekday_month["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
+        weekday_month = weekday_month.sort_values(["_order", "month"]).drop(columns=["_order"])
+        render_month_grouped_bar(
+            weekday_month,
+            x_col="dia_semana_label",
+            title="Resultado por día de semana y mes",
+            x_title="Día",
+            category_order=[weekday_labels[d] for d in weekday_order],
+        )
+        with st.expander("Ver tabla de día de semana por mes", expanded=False):
+            st.dataframe(weekday_month.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
+
+    # ========================================================
+    # 4. HOUR LAST
+    # ========================================================
+    st.subheader("4. Hora")
+    section_note("Por último miramos la hora. Este es el nivel más fino para decidir si bloquear ventanas específicas.")
+
     by_hour = aggregate_core(ops_df, ["hora_inicio"]).sort_values("hora_inicio")
     by_hour["hora_label"] = by_hour["hora_inicio"].apply(lambda h: f"{int(h):02d}:00" if pd.notna(h) else "Sin hora")
     render_summary_bar_chart(
@@ -1749,66 +1820,36 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
         x_title="Hora",
         sort_col="hora_inicio",
     )
-    st.dataframe(by_hour.drop(columns=["hora_label"], errors="ignore"), use_container_width=True)
-
-    st.subheader("3. Sesión")
-    by_session = aggregate_core(ops_df, ["sesion"])
-    by_session["_order"] = by_session["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
-    by_session = by_session.sort_values("_order").drop(columns=["_order"])
-    render_summary_bar_chart(
-        by_session,
-        x_col="sesion",
-        title="Resultado por sesión",
-        x_title="Sesión",
-        category_order=session_order,
-    )
-    st.dataframe(by_session, use_container_width=True)
-
-    if ops_df["month"].nunique() > 1:
-        st.subheader("4. Sesiones por mes")
-        st.caption("Esto ayuda a ver si una sesión fue buena solo en un mes o si se mantiene fuerte en varios meses.")
-        session_month = aggregate_core(ops_df, ["month", "sesion"])
-        session_month["_order"] = session_month["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
-        session_month = session_month.sort_values(["month", "_order"]).drop(columns=["_order"])
-        render_month_grouped_bar(
-            session_month,
-            x_col="sesion",
-            title="Resultado por sesión y mes",
-            x_title="Sesión",
-            category_order=session_order,
-        )
-        st.dataframe(session_month, use_container_width=True)
-
-        st.subheader("5. Días de semana por mes")
-        weekday_month = aggregate_core(ops_df, ["month", "dia_semana"])
-        weekday_month["dia_semana_label"] = weekday_month["dia_semana"].map(weekday_labels).fillna(weekday_month["dia_semana"].astype(str))
-        weekday_month["_order"] = weekday_month["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
-        weekday_month = weekday_month.sort_values(["month", "_order"]).drop(columns=["_order"])
-        render_month_grouped_bar(
-            weekday_month,
-            x_col="dia_semana_label",
-            title="Resultado por día de semana y mes",
-            x_title="Día",
-            category_order=[weekday_labels[d] for d in weekday_order],
-        )
-        st.dataframe(weekday_month.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
+    with st.expander("Ver tabla por hora", expanded=False):
+        st.dataframe(by_hour.drop(columns=["hora_label"], errors="ignore"), use_container_width=True)
 
     lines = []
-    if not by_hour.empty:
-        best_h = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
-        worst_h = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
-        lines.append(f"Mejor hora por PnL total: {best_h['hora_label']}.")
-        lines.append(f"Peor hora por PnL total: {worst_h['hora_label']}.")
     if not by_session.empty:
         best_s = by_session.sort_values("pnl_total", ascending=False).iloc[0]
         worst_s = by_session.sort_values("pnl_total", ascending=True).iloc[0]
         lines.append(f"Mejor sesión: {best_s['sesion']}.")
         lines.append(f"Sesión más débil: {worst_s['sesion']}.")
+    if not month_df.empty:
+        best_m = month_df.sort_values("pnl_total", ascending=False).iloc[0]
+        worst_m = month_df.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor mes: {best_m['month']}.")
+        lines.append(f"Mes más débil: {worst_m['month']}.")
+    if not daily.empty:
+        best_day = daily.sort_values("pnl_total", ascending=False).iloc[0]
+        worst_day = daily.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor día: {best_day['trade_day']}.")
+        lines.append(f"Peor día: {worst_day['trade_day']}.")
     if not weekday.empty:
         best_d = weekday.sort_values("pnl_total", ascending=False).iloc[0]
         worst_d = weekday.sort_values("pnl_total", ascending=True).iloc[0]
         lines.append(f"Mejor día de semana: {best_d['dia_semana_label']}.")
         lines.append(f"Día de semana más débil: {worst_d['dia_semana_label']}.")
+    if not by_hour.empty:
+        best_h = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
+        worst_h = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor hora por PnL total: {best_h['hora_label']}.")
+        lines.append(f"Peor hora por PnL total: {worst_h['hora_label']}.")
+
     show_conclusion("Tiempo y Sesiones", lines)
 
 
@@ -1835,12 +1876,15 @@ def render_motor_reversiones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.dataframe(rev, use_container_width=True)
 
     if len(rev) > 0:
-        fig, ax = plt.subplots(figsize=(9, 4))
-        ax.bar(rev["reversal_count"].fillna(0).astype(int).astype(str), rev["pnl_total"])
-        ax.set_title("PnL Total por Cantidad de Reversals")
-        ax.set_xlabel("Reversals usados")
-        ax.set_ylabel("PnL")
-        st.pyplot(fig)
+        rev_chart = rev.copy()
+        rev_chart["reversal_label"] = rev_chart["reversal_count"].fillna(0).astype(int).astype(str)
+        render_summary_bar_chart(
+            rev_chart,
+            x_col="reversal_label",
+            title="PnL total por cantidad de reversals",
+            x_title="Reversals usados",
+            category_order=rev_chart["reversal_label"].tolist(),
+        )
 
     st.markdown("---")
     st.subheader("2. Simulación simple por máximo reversal permitido")
