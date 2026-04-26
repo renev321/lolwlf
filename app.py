@@ -3707,65 +3707,66 @@ def render_explorador_operaciones(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             else:
                 st.info("Lectura rápida: este trade estuvo por encima del promedio del grupo.")
 
-        # Show a clear ranking instead of a histogram. Normal users can read this much faster.
-        chart_df = ranked.copy()
-        max_bars = 40
-        if len(chart_df) > max_bars:
-            # keep selected row + closest/worst/best context around ranking
-            selected_pos = selected_position if not pd.isna(selected_position) else 1
-            low = max(1, int(selected_pos) - 15)
-            high = min(len(chart_df), int(selected_pos) + 15)
-            keep = set(range(low - 1, high))
-            keep.update(range(0, min(5, len(chart_df))))
-            keep.update(range(max(0, len(chart_df) - 5), len(chart_df)))
-            chart_df = chart_df.iloc[sorted(keep)].copy()
+        # Clear visual comparison: selected trade vs the group summary.
+        # This is easier than a ranking chart because the selected trade is explicit.
+        compare_rows = [
+            {"label": "TRADE SELECCIONADO", "pnl": selected_pnl, "tipo": "Seleccionado"},
+            {"label": "Promedio de trades parecidos", "pnl": avg_context, "tipo": "Referencia"},
+            {"label": "Mediana de trades parecidos", "pnl": med_context, "tipo": "Referencia"},
+            {"label": "Mejor trade parecido", "pnl": best_context, "tipo": "Referencia"},
+            {"label": "Peor trade parecido", "pnl": worst_context, "tipo": "Referencia"},
+        ]
+        compare_df = pd.DataFrame(compare_rows).dropna(subset=["pnl"])
 
-        chart_df["label"] = chart_df["posicion"].astype(str) + " · " + chart_df["operation_id"].astype(str).str[-8:]
-        chart_df["es_seleccionado"] = chart_df["operation_id"].astype(str) == selected_id
-        chart_df["tipo"] = np.where(chart_df["es_seleccionado"], "Trade seleccionado", "Trade del grupo")
-
-        if go is not None and not chart_df.empty:
-            custom_cols = [
-                "operation_id", "month", "trade_day", "sesion", "hora_inicio", "reversal_count",
-                "sequence_net_pnl_currency", "operation_max_drawdown_currency", "sequence_end_reason", "posicion", "tipo",
-            ]
-            custom_cols = [c for c in custom_cols if c in chart_df.columns]
-
+        if go is not None and not compare_df.empty:
             fig = go.Figure()
             fig.add_trace(go.Bar(
-                x=chart_df["sequence_net_pnl_currency"],
-                y=chart_df["label"],
+                x=compare_df["pnl"],
+                y=compare_df["label"],
                 orientation="h",
-                customdata=chart_df[custom_cols].to_numpy(),
-                marker_color=np.where(chart_df["es_seleccionado"], "#F39C12", "#2E86C1"),
+                marker_color=np.where(compare_df["tipo"] == "Seleccionado", "#F39C12", "#2E86C1"),
+                text=compare_df["pnl"].map(lambda x: f"${x:,.2f}"),
+                textposition="outside",
+                customdata=compare_df[["label", "tipo", "pnl"]].to_numpy(),
                 hovertemplate=(
-                    "Tipo: %{customdata[-1]}<br>"
-                    "Operación: %{customdata[0]}<br>"
-                    "Mes: %{customdata[1]}<br>"
-                    "Día: %{customdata[2]}<br>"
-                    "Sesión: %{customdata[3]}<br>"
-                    "Hora: %{customdata[4]}:00<br>"
-                    "Reversals: %{customdata[5]}<br>"
-                    "PnL: %{x:,.2f}<br>"
-                    "Drawdown: %{customdata[7]:,.2f}<br>"
-                    "Cierre: %{customdata[8]}<br>"
-                    "Posición: %{customdata[9]}<extra></extra>"
+                    "%{customdata[0]}<br>"
+                    "Tipo: %{customdata[1]}<br>"
+                    "PnL: $%{customdata[2]:,.2f}<extra></extra>"
                 ),
-                name="Trades del contexto",
+                name="Comparación",
             ))
-            fig.add_vline(x=avg_context, line_width=2, line_dash="dot", annotation_text="Promedio", annotation_position="top")
             fig.add_vline(x=0, line_width=1)
             fig.update_layout(
-                title="Ranking de trades dentro del contexto",
+                title="Trade seleccionado vs trades parecidos",
                 xaxis_title="PnL",
-                yaxis_title="Trade",
-                height=max(420, min(850, 80 + 22 * len(chart_df))),
-                margin=dict(l=120, r=30, t=55, b=45),
+                yaxis_title="",
+                height=430,
+                margin=dict(l=230, r=90, t=55, b=45),
             )
             fig.update_yaxes(autorange="reversed")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.dataframe(chart_df, use_container_width=True)
+            st.dataframe(compare_df, use_container_width=True)
+
+        # Optional: ranking table, with plain labels.
+        chart_df = ranked.copy()
+        chart_df["es_seleccionado"] = chart_df["operation_id"].astype(str) == selected_id
+        chart_df["tipo_trade"] = np.where(chart_df["es_seleccionado"], "TRADE SELECCIONADO", "Trade parecido")
+        chart_df["nombre_simple"] = np.where(
+            chart_df["es_seleccionado"],
+            "TRADE SELECCIONADO",
+            "Trade parecido " + chart_df["posicion"].astype(str),
+        )
+
+        with st.expander("Ver ranking de trades parecidos", expanded=False):
+            st.caption("Aquí sí puedes ver el ranking completo. El trade seleccionado aparece marcado como TRADE SELECCIONADO.")
+            rank_cols = [
+                "posicion", "tipo_trade", "nombre_simple", "operation_id", "month", "trade_day",
+                "sequence_net_pnl_currency", "reversal_count", "operation_max_drawdown_currency",
+                "sesion", "hora_inicio", "sequence_end_reason",
+            ]
+            rank_cols = [c for c in rank_cols if c in chart_df.columns]
+            st.dataframe(chart_df[rank_cols], use_container_width=True)
 
         with st.expander("Ver trades usados en esta comparación", expanded=False):
             context_cols = [
