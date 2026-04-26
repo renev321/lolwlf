@@ -2830,15 +2830,11 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             contract_multiplier=contract_multiplier,
         )
 
-        st.markdown("**1. Resultado del bot dividido en ciclos**")
-        st.caption("Esto todavía no es el resultado de las cuentas. Aquí solo vemos cómo queda el bot cuando lo partimos en ciclos: cada ciclo termina al tocar meta, pérdida o fin del día operativo. Después esos ciclos se reparten entre las cuentas.")
-        c = st.columns(4)
-        with c[0]: card("PnL si operara una sola cuenta", fmt_money(sets_m.get("total_pnl", np.nan)))
-        with c[1]: card("Ciclos que llegan a meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
-        with c[2]: card("Ciclos que llegan a pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
-        with c[3]: card("Entradas promedio por ciclo", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
-
-        st.markdown("**2. Reglas de las cuentas**")
+        st.markdown("**1. Reglas de las cuentas**")
+        st.caption(
+            "Los ciclos se calculan en segundo plano. Lo importante aquí es ver qué pasa cuando esos ciclos se reparten entre las cuentas. "
+            "Si quieres revisar los ciclos individuales, están abajo en el expander Ver ciclos generados."
+        )
         a1, a2, a3, a4 = st.columns(4)
         total_accounts = a1.number_input("Cantidad total de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
         accounts_per_set = a2.number_input("Cuentas por grupo", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
@@ -2878,7 +2874,7 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             flat_at_account_loss=flat_at_account_loss,
         )
 
-        st.markdown("**3. Resultado después de repartir los ciclos entre cuentas**")
+        st.markdown("**2. Resultado después de repartir los ciclos entre cuentas**")
         r1 = st.columns(4)
         with r1[0]: card("PnL Bruto", fmt_money(rotation_m.get("gross_pnl", np.nan)))
         with r1[1]: card("Costo Total", fmt_money(rotation_m.get("total_cost", np.nan)))
