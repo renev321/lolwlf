@@ -1433,6 +1433,154 @@ def render_dashboard_general(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         lines.append("La peor operación es grande comparada con el promedio; revisar Risk Killers y Motor de Reversiones.")
     show_conclusion("Dashboard General", lines)
 
+
+def render_summary_bar_chart(
+    df: pd.DataFrame,
+    x_col: str,
+    title: str,
+    x_title: str,
+    sort_col: str | None = None,
+    category_order: List | None = None,
+):
+    """Interactive summary bar used in Tiempo y Sesiones."""
+    if df.empty or x_col not in df.columns or "pnl_total" not in df.columns:
+        return
+
+    chart_df = df.copy()
+
+    if category_order is not None:
+        order_map = {v: i for i, v in enumerate(category_order)}
+        chart_df["_order"] = chart_df[x_col].map(order_map).fillna(999)
+        chart_df = chart_df.sort_values("_order").drop(columns=["_order"])
+    elif sort_col and sort_col in chart_df.columns:
+        chart_df = chart_df.sort_values(sort_col)
+
+    custom_cols = []
+    hover_lines = [f"<b>{x_title}:</b> %{{x}}", "<b>PnL:</b> $%{y:,.2f}"]
+
+    optional_cols = [
+        ("operaciones", "Operaciones", "int"),
+        ("tasa_acierto", "Win rate", "pct"),
+        ("profit_factor", "Profit factor", "num"),
+        ("pnl_promedio", "PnL promedio", "money"),
+        ("peor_operacion", "Peor operación", "money"),
+        ("mejor_operacion", "Mejor operación", "money"),
+        ("drawdown_promedio", "Drawdown promedio", "money"),
+        ("drawdown_max", "Mayor drawdown", "money"),
+        ("reversiones_promedio", "Reversals promedio", "num"),
+        ("contratos_max", "Máx contratos", "num"),
+    ]
+
+    for col, label, kind in optional_cols:
+        if col in chart_df.columns:
+            custom_cols.append(col)
+            idx = len(custom_cols) - 1
+            if kind == "pct":
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.1f}}%")
+            elif kind == "money":
+                hover_lines.append(f"<b>{label}:</b> $%{{customdata[{idx}]:,.2f}}")
+            elif kind == "int":
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.0f}}")
+            else:
+                hover_lines.append(f"<b>{label}:</b> %{{customdata[{idx}]:.2f}}")
+
+    hovertemplate = "<br>".join(hover_lines) + "<extra></extra>"
+
+    if go is not None:
+        fig = go.Figure()
+        fig.add_bar(
+            x=chart_df[x_col],
+            y=chart_df["pnl_total"],
+            customdata=chart_df[custom_cols].to_numpy() if custom_cols else None,
+            hovertemplate=hovertemplate,
+            name="PnL",
+        )
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(
+            title=title,
+            xaxis_title=x_title,
+            yaxis_title="PnL",
+            hovermode="closest",
+            height=420,
+            margin=dict(l=40, r=25, t=55, b=55),
+        )
+        fig.update_xaxes(type="category")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    st.warning("Plotly no está instalado. El gráfico será estático y no tendrá hover.")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(chart_df[x_col].astype(str), chart_df["pnl_total"])
+    ax.axhline(0, linewidth=1)
+    ax.set_title(title)
+    ax.set_xlabel(x_title)
+    ax.set_ylabel("PnL")
+    ax.tick_params(axis="x", rotation=25)
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+def render_month_grouped_bar(
+    df: pd.DataFrame,
+    x_col: str,
+    title: str,
+    x_title: str,
+    category_order: List | None = None,
+):
+    """Interactive grouped bar by month for time/session stability."""
+    if df.empty or "month" not in df.columns or x_col not in df.columns:
+        return
+
+    chart_df = df.copy()
+    if category_order is not None:
+        order_map = {v: i for i, v in enumerate(category_order)}
+        chart_df["_order"] = chart_df[x_col].map(order_map).fillna(999)
+        chart_df = chart_df.sort_values(["_order", "month"]).drop(columns=["_order"])
+    else:
+        chart_df = chart_df.sort_values([x_col, "month"])
+
+    if go is None:
+        st.warning("Plotly no está instalado. El gráfico por mes será tabla solamente.")
+        return
+
+    custom_cols = ["operaciones", "tasa_acierto", "profit_factor", "pnl_promedio", "peor_operacion", "mejor_operacion"]
+    custom_cols = [c for c in custom_cols if c in chart_df.columns]
+
+    fig = go.Figure()
+    for month, month_df in chart_df.groupby("month"):
+        fig.add_bar(
+            x=month_df[x_col],
+            y=month_df["pnl_total"],
+            name=str(month),
+            customdata=month_df[custom_cols].to_numpy() if custom_cols else None,
+            hovertemplate=(
+                f"<b>Mes:</b> {month}<br>"
+                f"<b>{x_title}:</b> %{{x}}<br>"
+                "<b>PnL:</b> $%{y:,.2f}<br>"
+                "<b>Operaciones:</b> %{customdata[0]:.0f}<br>"
+                "<b>Win rate:</b> %{customdata[1]:.1f}%<br>"
+                "<b>Profit factor:</b> %{customdata[2]:.2f}<br>"
+                "<b>PnL promedio:</b> $%{customdata[3]:,.2f}<br>"
+                "<b>Peor operación:</b> $%{customdata[4]:,.2f}<br>"
+                "<b>Mejor operación:</b> $%{customdata[5]:,.2f}"
+                "<extra></extra>"
+            ),
+        )
+
+    fig.add_hline(y=0, line_width=1)
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_title,
+        yaxis_title="PnL",
+        barmode="group",
+        hovermode="closest",
+        height=430,
+        margin=dict(l=40, r=25, t=55, b=55),
+    )
+    fig.update_xaxes(type="category")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
     st.header("Tiempo y Sesiones")
     section_note("Esta página responde: ¿cuándo debería operar el bot y qué horarios/sesiones conviene bloquear?")
@@ -1451,44 +1599,102 @@ def render_tiempo_y_sesiones(ops_df: pd.DataFrame):
         st.warning("No hay operaciones con los filtros actuales.")
         return
 
-    st.subheader("Día de semana")
     weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    weekday_labels = {
+        "Monday": "Lunes",
+        "Tuesday": "Martes",
+        "Wednesday": "Miércoles",
+        "Thursday": "Jueves",
+        "Friday": "Viernes",
+        "Saturday": "Sábado",
+        "Sunday": "Domingo",
+    }
+    session_order = ["Asia", "Londres", "NY Open", "NY Midday", "NY Late", "Fuera de Sesión", "Sin sesión"]
+
+    st.subheader("1. Día de semana")
     weekday = aggregate_core(ops_df, ["dia_semana"])
+    weekday["dia_semana_label"] = weekday["dia_semana"].map(weekday_labels).fillna(weekday["dia_semana"].astype(str))
     weekday["_order"] = weekday["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
     weekday = weekday.sort_values("_order").drop(columns=["_order"])
-    st.dataframe(weekday, use_container_width=True)
+    render_summary_bar_chart(
+        weekday,
+        x_col="dia_semana_label",
+        title="Resultado por día de semana",
+        x_title="Día",
+        category_order=[weekday_labels[d] for d in weekday_order],
+    )
+    st.dataframe(weekday.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
 
-    st.subheader("Hora")
+    st.subheader("2. Hora")
     by_hour = aggregate_core(ops_df, ["hora_inicio"]).sort_values("hora_inicio")
-    st.dataframe(by_hour, use_container_width=True)
-    if len(by_hour) > 1:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.bar(by_hour["hora_inicio"].astype(str), by_hour["pnl_total"])
-        ax.set_title("PnL por Hora")
-        ax.set_xlabel("Hora")
-        ax.set_ylabel("PnL")
-        st.pyplot(fig)
+    by_hour["hora_label"] = by_hour["hora_inicio"].apply(lambda h: f"{int(h):02d}:00" if pd.notna(h) else "Sin hora")
+    render_summary_bar_chart(
+        by_hour,
+        x_col="hora_label",
+        title="Resultado por hora",
+        x_title="Hora",
+        sort_col="hora_inicio",
+    )
+    st.dataframe(by_hour.drop(columns=["hora_label"], errors="ignore"), use_container_width=True)
 
-    st.subheader("Sesión")
-    by_session = aggregate_core(ops_df, ["sesion"]).sort_values("pnl_total", ascending=False)
+    st.subheader("3. Sesión")
+    by_session = aggregate_core(ops_df, ["sesion"])
+    by_session["_order"] = by_session["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
+    by_session = by_session.sort_values("_order").drop(columns=["_order"])
+    render_summary_bar_chart(
+        by_session,
+        x_col="sesion",
+        title="Resultado por sesión",
+        x_title="Sesión",
+        category_order=session_order,
+    )
     st.dataframe(by_session, use_container_width=True)
 
     if ops_df["month"].nunique() > 1:
-        st.subheader("Sesión por mes")
-        session_month = aggregate_core(ops_df, ["month", "sesion"]).sort_values(["month", "pnl_total"], ascending=[True, False])
+        st.subheader("4. Sesiones por mes")
+        st.caption("Esto ayuda a ver si una sesión fue buena solo en un mes o si se mantiene fuerte en varios meses.")
+        session_month = aggregate_core(ops_df, ["month", "sesion"])
+        session_month["_order"] = session_month["sesion"].apply(lambda x: session_order.index(x) if x in session_order else 99)
+        session_month = session_month.sort_values(["month", "_order"]).drop(columns=["_order"])
+        render_month_grouped_bar(
+            session_month,
+            x_col="sesion",
+            title="Resultado por sesión y mes",
+            x_title="Sesión",
+            category_order=session_order,
+        )
         st.dataframe(session_month, use_container_width=True)
+
+        st.subheader("5. Días de semana por mes")
+        weekday_month = aggregate_core(ops_df, ["month", "dia_semana"])
+        weekday_month["dia_semana_label"] = weekday_month["dia_semana"].map(weekday_labels).fillna(weekday_month["dia_semana"].astype(str))
+        weekday_month["_order"] = weekday_month["dia_semana"].apply(lambda x: weekday_order.index(x) if x in weekday_order else 99)
+        weekday_month = weekday_month.sort_values(["month", "_order"]).drop(columns=["_order"])
+        render_month_grouped_bar(
+            weekday_month,
+            x_col="dia_semana_label",
+            title="Resultado por día de semana y mes",
+            x_title="Día",
+            category_order=[weekday_labels[d] for d in weekday_order],
+        )
+        st.dataframe(weekday_month.drop(columns=["dia_semana_label"], errors="ignore"), use_container_width=True)
 
     lines = []
     if not by_hour.empty:
         best_h = by_hour.sort_values("pnl_total", ascending=False).iloc[0]
         worst_h = by_hour.sort_values("pnl_total", ascending=True).iloc[0]
-        lines.append(f"Mejor hora por PnL total: {int(best_h['hora_inicio'])}:00.")
-        lines.append(f"Peor hora por PnL total: {int(worst_h['hora_inicio'])}:00.")
+        lines.append(f"Mejor hora por PnL total: {best_h['hora_label']}.")
+        lines.append(f"Peor hora por PnL total: {worst_h['hora_label']}.")
     if not by_session.empty:
-        best_s = by_session.iloc[0]
+        best_s = by_session.sort_values("pnl_total", ascending=False).iloc[0]
         worst_s = by_session.sort_values("pnl_total", ascending=True).iloc[0]
         lines.append(f"Mejor sesión: {best_s['sesion']}.")
         lines.append(f"Sesión más débil: {worst_s['sesion']}.")
+    if not weekday.empty:
+        best_d = weekday.sort_values("pnl_total", ascending=False).iloc[0]
+        worst_d = weekday.sort_values("pnl_total", ascending=True).iloc[0]
+        lines.append(f"Mejor día de semana: {best_d['dia_semana_label']}.")
+        lines.append(f"Día de semana más débil: {worst_d['dia_semana_label']}.")
     show_conclusion("Tiempo y Sesiones", lines)
 
 
