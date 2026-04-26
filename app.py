@@ -761,6 +761,7 @@ def _prepare_leg_timeline(
     use_operational_day: bool = False,
     session_start_hms: str = "18:00:00",
     session_end_hms: str = "17:00:00",
+    contract_multiplier: float = 1.0,
 ) -> pd.DataFrame:
     """Return one row per real executed leg, ordered by the moment the PnL becomes known.
 
@@ -782,7 +783,17 @@ def _prepare_leg_timeline(
     elif "trade_day" not in legs.columns or legs["trade_day"].isna().all():
         legs["trade_day"] = legs["event_time"].dt.date
 
-    legs["leg_pnl"] = pd.to_numeric(legs["realized_pnl_currency"], errors="coerce").fillna(0.0)
+    legs["real_leg_pnl"] = pd.to_numeric(legs["realized_pnl_currency"], errors="coerce").fillna(0.0)
+    legs["contract_multiplier"] = float(contract_multiplier or 1.0)
+    legs["leg_pnl"] = legs["real_leg_pnl"] * legs["contract_multiplier"]
+
+    if "entry_qty" in legs.columns:
+        legs["real_contracts"] = pd.to_numeric(legs["entry_qty"], errors="coerce")
+        legs["simulated_contracts"] = legs["real_contracts"] * legs["contract_multiplier"]
+    else:
+        legs["real_contracts"] = np.nan
+        legs["simulated_contracts"] = np.nan
+
     legs["leg_sort"] = pd.to_numeric(legs["leg_index"], errors="coerce").fillna(0)
 
     return legs.sort_values(["trade_day", "event_time", "operation_id", "leg_sort"]).copy()
@@ -848,6 +859,7 @@ def simulate_daily_stop(
     use_operational_day: bool = False,
     session_start_hms: str = "18:00:00",
     session_end_hms: str = "17:00:00",
+    contract_multiplier: float = 1.0,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Classic daily stop using real legs.
 
@@ -859,7 +871,7 @@ def simulate_daily_stop(
     -615 when the configured max loss was -600.
     """
     rows = []
-    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms, contract_multiplier=contract_multiplier)
     if legs.empty:
         return pd.DataFrame(), {}
 
@@ -946,6 +958,8 @@ def simulate_daily_sets(
     use_operational_day: bool = False,
     session_start_hms: str = "18:00:00",
     session_end_hms: str = "17:00:00",
+    flat_at_limits: bool = True,
+    contract_multiplier: float = 1.0,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Daily set simulator using legs.
 
@@ -953,7 +967,7 @@ def simulate_daily_sets(
     reaches target/loss, that set closes and the next leg starts a new set.
     """
     rows = []
-    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms, contract_multiplier=contract_multiplier)
     if legs.empty:
         return pd.DataFrame(), {}
 
@@ -987,10 +1001,10 @@ def simulate_daily_sets(
             result = None
             if running >= set_target:
                 outcome = "Set target reached"
-                result = set_target
+                result = set_target if flat_at_limits else raw_running
             elif running <= -set_loss:
                 outcome = "Set loss reached"
-                result = -set_loss
+                result = -set_loss if flat_at_limits else raw_running
 
             if outcome:
                 month_value = day_df["month"].dropna().iloc[0] if "month" in day_df.columns and not day_df["month"].dropna().empty else ""
@@ -1058,6 +1072,186 @@ def simulate_daily_sets(
     }
     return sets, metrics
 
+
+
+def simulate_account_rotation_from_sets(
+    sets_df: pd.DataFrame,
+    total_accounts: int,
+    accounts_per_set: int,
+    account_cost: float,
+    account_max_loss: float,
+    account_profit_target: float = 0.0,
+    flat_at_account_loss: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
+    """Rotate set results through multiple accounts.
+
+    Each set result is applied to a group of accounts. If accounts_per_set=2,
+    that means the same set is copied to two accounts, then the simulator rotates
+    to the next available accounts for the next set.
+    """
+    if sets_df.empty or total_accounts <= 0:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    total_accounts = int(max(1, total_accounts))
+    accounts_per_set = int(max(1, min(accounts_per_set, total_accounts)))
+    account_max_loss = float(account_max_loss or 0.0)
+    account_profit_target = float(account_profit_target or 0.0)
+    account_cost = float(account_cost or 0.0)
+
+    accounts = []
+    for i in range(1, total_accounts + 1):
+        accounts.append({
+            "account": i,
+            "status": "Viva",
+            "gross_pnl": 0.0,
+            "peak_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "sets_traded": 0,
+            "winning_sets": 0,
+            "losing_sets": 0,
+            "first_set_time": pd.NaT,
+            "last_set_time": pd.NaT,
+        })
+
+    rows = []
+    pointer = 0
+    ordered = sets_df.copy().sort_values(["trade_day", "set_start_time", "set_number"])
+
+    for _, set_row in ordered.iterrows():
+        selected = []
+        attempts = 0
+        while len(selected) < accounts_per_set and attempts < total_accounts * 2:
+            idx = pointer % total_accounts
+            pointer += 1
+            attempts += 1
+            if accounts[idx]["status"] == "Viva" and idx not in selected:
+                selected.append(idx)
+
+        if not selected:
+            break
+
+        set_result = float(set_row.get("set_result", 0.0) or 0.0)
+
+        for idx in selected:
+            acc = accounts[idx]
+            before = acc["gross_pnl"]
+            after_raw = before + set_result
+            after = after_raw
+            status_before = acc["status"]
+            event_status = "Viva"
+
+            if account_max_loss > 0 and after_raw <= -account_max_loss:
+                event_status = "Quemada"
+                after = -account_max_loss if flat_at_account_loss else after_raw
+                acc["status"] = "Quemada"
+            elif account_profit_target > 0 and after_raw >= account_profit_target:
+                event_status = "Objetivo"
+                after = account_profit_target if flat_at_account_loss else after_raw
+                acc["status"] = "Objetivo"
+
+            applied = after - before
+            acc["gross_pnl"] = after
+            acc["sets_traded"] += 1
+            acc["winning_sets"] += int(applied > 0)
+            acc["losing_sets"] += int(applied < 0)
+            if pd.isna(acc["first_set_time"]):
+                acc["first_set_time"] = set_row.get("set_start_time")
+            acc["last_set_time"] = set_row.get("set_end_time")
+            acc["peak_pnl"] = max(acc["peak_pnl"], acc["gross_pnl"])
+            current_dd = acc["gross_pnl"] - acc["peak_pnl"]
+            acc["max_drawdown"] = min(acc["max_drawdown"], current_dd)
+
+            rows.append({
+                "trade_day": set_row.get("trade_day"),
+                "month": set_row.get("month"),
+                "set_number": set_row.get("set_number"),
+                "account": acc["account"],
+                "set_result_original": set_result,
+                "set_result_applied": applied,
+                "account_pnl_before": before,
+                "account_pnl_after": acc["gross_pnl"],
+                "account_status_before": status_before,
+                "account_status_after": acc["status"],
+                "event_status": event_status,
+                "set_outcome": set_row.get("set_outcome"),
+                "legs_used": set_row.get("legs_used"),
+                "operations_touched": set_row.get("operations_touched"),
+                "set_start_time": set_row.get("set_start_time"),
+                "set_end_time": set_row.get("set_end_time"),
+            })
+
+    timeline = pd.DataFrame(rows)
+    account_rows = []
+    for acc in accounts:
+        gross = float(acc["gross_pnl"])
+        account_rows.append({
+            "account": acc["account"],
+            "status": "No usada" if acc["sets_traded"] == 0 else acc["status"],
+            "gross_pnl": gross,
+            "account_cost": account_cost,
+            "net_pnl_after_cost": gross - account_cost,
+            "max_drawdown": acc["max_drawdown"],
+            "sets_traded": acc["sets_traded"],
+            "winning_sets": acc["winning_sets"],
+            "losing_sets": acc["losing_sets"],
+            "first_set_time": acc["first_set_time"],
+            "last_set_time": acc["last_set_time"],
+        })
+    accounts_df = pd.DataFrame(account_rows)
+
+    metrics = {
+        "total_accounts": total_accounts,
+        "used_accounts": int((accounts_df["sets_traded"] > 0).sum()),
+        "alive_accounts": int((accounts_df["status"] == "Viva").sum()),
+        "blown_accounts": int((accounts_df["status"] == "Quemada").sum()),
+        "target_accounts": int((accounts_df["status"] == "Objetivo").sum()),
+        "survival_rate": ((accounts_df["status"] == "Viva").sum() / total_accounts * 100) if total_accounts else np.nan,
+        "gross_pnl": accounts_df["gross_pnl"].sum(),
+        "total_cost": total_accounts * account_cost,
+        "net_pnl_after_cost": accounts_df["net_pnl_after_cost"].sum(),
+        "best_account": accounts_df["net_pnl_after_cost"].max() if not accounts_df.empty else np.nan,
+        "worst_account": accounts_df["net_pnl_after_cost"].min() if not accounts_df.empty else np.nan,
+        "worst_account_drawdown": accounts_df["max_drawdown"].min() if not accounts_df.empty else np.nan,
+        "sets_applied": len(timeline),
+    }
+    return accounts_df, timeline, metrics
+
+
+def render_account_rotation_chart(accounts_df: pd.DataFrame):
+    if accounts_df.empty:
+        return
+    chart_df = accounts_df.copy()
+    chart_df["account_label"] = "Cuenta " + chart_df["account"].astype(str)
+    if go is not None:
+        custom = chart_df[["account_label", "status", "gross_pnl", "account_cost", "net_pnl_after_cost", "max_drawdown", "sets_traded"]].to_numpy()
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=chart_df["account_label"],
+            y=chart_df["net_pnl_after_cost"],
+            name="Resultado neto",
+            customdata=custom,
+            hovertemplate=(
+                "Cuenta: %{customdata[0]}<br>"
+                "Estado: %{customdata[1]}<br>"
+                "PnL bruto: %{customdata[2]:,.2f}<br>"
+                "Costo cuenta: %{customdata[3]:,.2f}<br>"
+                "Neto después de costo: %{customdata[4]:,.2f}<br>"
+                "Caída máx cuenta: %{customdata[5]:,.2f}<br>"
+                "Sets operados: %{customdata[6]}<extra></extra>"
+            ),
+        ))
+        fig.add_hline(y=0, line_width=1)
+        fig.update_layout(title="Resultado por cuenta después del costo", xaxis_title="Cuenta", yaxis_title="PnL neto", height=420)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(chart_df["account_label"], chart_df["net_pnl_after_cost"])
+        ax.axhline(0, linewidth=1)
+        ax.set_title("Resultado por cuenta después del costo")
+        ax.set_ylabel("PnL neto")
+        plt.xticks(rotation=30)
+        fig.tight_layout()
+        st.pyplot(fig)
 
 
 def render_real_vs_sim_daily_cards(real_m: Dict[str, float], sim_m: Dict[str, float]):
@@ -2365,19 +2559,44 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     session_start_hms = s2.text_input("Inicio sesión", value="18:00:00", key="daily_session_start")
     session_end_hms = s3.text_input("Fin sesión", value="17:00:00", key="daily_session_end")
 
+    st.markdown("**Simulación de contratos**")
+    k1, k2, k3 = st.columns([1, 1, 1.2])
+    contract_mode = k1.selectbox(
+        "Modo contratos",
+        ["Contratos reales", "Multiplicador simple"],
+        index=0,
+        help="Multiplicador simple recalcula cada pierna: PnL simulado = PnL real de la pierna x multiplicador.",
+    )
+    contract_multiplier = 1.0
+    if contract_mode == "Multiplicador simple":
+        contract_multiplier = k2.number_input("Multiplicador", min_value=0.10, value=1.00, step=0.25, format="%.2f")
+    else:
+        k2.metric("Multiplicador", "1.00x")
+
+    scale_limits_with_contracts = k3.checkbox(
+        "Escalar meta/pérdida con contratos",
+        value=False,
+        help="OFF: si subes contratos, la meta/pérdida diaria se mantiene igual y se toca más rápido. ON: meta y pérdida también se multiplican.",
+    )
+
+    effective_daily_target = daily_target * contract_multiplier if scale_limits_with_contracts else daily_target
+    effective_daily_loss = daily_loss * contract_multiplier if scale_limits_with_contracts else daily_loss
+
     st.caption(
         "Regla: después de cada pierna cerrada revisamos el PnL acumulado del día operativo. "
-        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de esa sesión se ignoran en la simulación."
+        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de esa sesión se ignoran en la simulación. "
+        f"Valores usados: meta {effective_daily_target:,.2f}, pérdida {effective_daily_loss:,.2f}, contratos {contract_multiplier:.2f}x."
     )
 
     daily_df, daily_m = simulate_daily_stop(
         legs_df,
-        daily_target,
-        daily_loss,
+        effective_daily_target,
+        effective_daily_loss,
         flat_at_limits=flat_at_limits,
         use_operational_day=use_operational_day,
         session_start_hms=session_start_hms,
         session_end_hms=session_end_hms,
+        contract_multiplier=contract_multiplier,
     )
     real_daily = real_daily_from_legs(legs_df, use_operational_day, session_start_hms, session_end_hms)
     real_m = _daily_metrics_from_results(real_daily, "real_day_pnl", "trade_day")
@@ -2422,40 +2641,92 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         st.dataframe(daily_df[[c for c in display_cols if c in daily_df.columns]].sort_values("trade_day"), use_container_width=True)
 
     st.markdown("---")
-    st.subheader("6. Sets diarios / avanzado")
+    st.subheader("6. Rotación de cuentas / avanzado")
     section_note(
-        "Esto es opcional. A diferencia del stop diario clásico, aquí el día puede tener varios sets. "
-        "Cuando un set toca target o loss, la siguiente pierna empieza otro set."
+        "Esto usa los sets para probar una idea más real: comprar varias cuentas, rotarlas, "
+        "ver cuántas sobreviven y calcular el resultado después del costo."
     )
 
-    show_sets = st.checkbox("Mostrar simulador de sets diarios", value=False)
+    show_sets = st.checkbox("Mostrar rotación de cuentas", value=False)
     if show_sets:
-        c1, c2 = st.columns(2)
+        st.markdown("**Reglas del set**")
+        c1, c2, c3 = st.columns(3)
         set_target = c1.number_input("Target por set", min_value=1.0, value=600.0, step=50.0, key="set_target")
-        set_loss = c2.number_input("Loss por set", min_value=1.0, value=300.0, step=50.0, key="set_loss")
+        set_loss = c2.number_input("Loss por set", min_value=1.0, value=600.0, step=50.0, key="set_loss")
+        scale_set_limits = c3.checkbox(
+            "Escalar target/loss del set con contratos",
+            value=False,
+            help="ON multiplica target/loss del set por el multiplicador de contratos. OFF mantiene el valor fijo.",
+        )
+        effective_set_target = set_target * contract_multiplier if scale_set_limits else set_target
+        effective_set_loss = set_loss * contract_multiplier if scale_set_limits else set_loss
 
-        sets_df, sets_m = simulate_daily_sets(legs_df, set_target, set_loss, use_operational_day, session_start_hms, session_end_hms)
+        sets_df, sets_m = simulate_daily_sets(
+            legs_df,
+            effective_set_target,
+            effective_set_loss,
+            use_operational_day,
+            session_start_hms,
+            session_end_hms,
+            flat_at_limits=flat_at_limits,
+            contract_multiplier=contract_multiplier,
+        )
+
+        st.markdown("**Resultado de sets antes de rotar cuentas**")
         c = st.columns(4)
         with c[0]: card("PnL Sets", fmt_money(sets_m.get("total_pnl", np.nan)))
         with c[1]: card("Sets Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
         with c[2]: card("Sets Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
         with c[3]: card("Piernas/Set Prom", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
 
-        st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
+        st.markdown("**Reglas de cuentas**")
+        a1, a2, a3, a4 = st.columns(4)
+        total_accounts = a1.number_input("Cantidad de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
+        accounts_per_set = a2.number_input("Cuentas copiadas por set", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
+        account_cost = a3.number_input("Costo por cuenta", min_value=0.0, value=150.0, step=25.0, key="account_cost")
+        account_max_loss = a4.number_input("Pérdida máxima por cuenta / blowup", min_value=1.0, value=2500.0, step=100.0, key="account_max_loss")
 
-        if not sets_df.empty:
-            monthly_sets = sets_df.groupby("month", as_index=False).agg(
-                sets=("set_number", "count"),
-                pnl_sets=("set_result", "sum"),
-                promedio_set=("set_result", "mean"),
-                meta_pct=("set_outcome", lambda ss: (ss == "Set target reached").mean() * 100),
-                perdida_pct=("set_outcome", lambda ss: (ss == "Set loss reached").mean() * 100),
-                abierto_pct=("set_outcome", lambda ss: (ss == "End of day").mean() * 100),
-                piernas_por_set=("legs_used", "mean"),
-                operaciones_por_set=("operations_touched", "mean"),
-            )
-            st.markdown("**Resumen mensual · Sets diarios**")
-            st.dataframe(monthly_sets, use_container_width=True)
+        a5, a6 = st.columns(2)
+        account_profit_target = a5.number_input("Objetivo por cuenta opcional", min_value=0.0, value=0.0, step=100.0, key="account_profit_target")
+        flat_at_account_loss = a6.checkbox(
+            "Flat exacto en blowup/objetivo de cuenta",
+            value=True,
+            help="ON: si la cuenta cae por debajo del límite, se registra exactamente en el límite. OFF: usa el cierre real del set.",
+        )
+
+        accounts_df, rotation_timeline, rotation_m = simulate_account_rotation_from_sets(
+            sets_df,
+            total_accounts=int(total_accounts),
+            accounts_per_set=int(accounts_per_set),
+            account_cost=float(account_cost),
+            account_max_loss=float(account_max_loss),
+            account_profit_target=float(account_profit_target),
+            flat_at_account_loss=flat_at_account_loss,
+        )
+
+        st.markdown("**Resumen de rotación**")
+        r1 = st.columns(4)
+        with r1[0]: card("PnL Bruto", fmt_money(rotation_m.get("gross_pnl", np.nan)))
+        with r1[1]: card("Costo Total", fmt_money(rotation_m.get("total_cost", np.nan)))
+        with r1[2]: card("Resultado Neto", fmt_money(rotation_m.get("net_pnl_after_cost", np.nan)))
+        with r1[3]: card("Cuentas Quemadas", f"{int(rotation_m.get('blown_accounts', 0))} / {int(rotation_m.get('total_accounts', 0))}")
+
+        r2 = st.columns(4)
+        with r2[0]: card("Cuentas Vivas", f"{int(rotation_m.get('alive_accounts', 0))}")
+        with r2[1]: card("Cuentas en Objetivo", f"{int(rotation_m.get('target_accounts', 0))}")
+        with r2[2]: card("Mejor Cuenta", fmt_money(rotation_m.get("best_account", np.nan)))
+        with r2[3]: card("Peor Cuenta", fmt_money(rotation_m.get("worst_account", np.nan)))
+
+        render_account_rotation_chart(accounts_df)
+
+        with st.expander("Ver resumen por cuenta", expanded=True):
+            st.dataframe(accounts_df, use_container_width=True)
+
+        with st.expander("Ver timeline de rotación", expanded=False):
+            st.dataframe(rotation_timeline, use_container_width=True)
+
+        with st.expander("Ver sets generados", expanded=False):
+            st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
 
     lines = []
     if daily_m:
