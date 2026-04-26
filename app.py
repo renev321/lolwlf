@@ -1000,10 +1000,10 @@ def simulate_daily_sets(
             outcome = None
             result = None
             if running >= set_target:
-                outcome = "Set target reached"
+                outcome = "Meta tocada"
                 result = set_target if flat_at_limits else raw_running
             elif running <= -set_loss:
-                outcome = "Set loss reached"
+                outcome = "Pérdida tocada"
                 result = -set_loss if flat_at_limits else raw_running
 
             if outcome:
@@ -1045,7 +1045,7 @@ def simulate_daily_sets(
                     "set_number": set_number,
                     "set_result": running,
                     "raw_pnl_at_set_close": raw_running,
-                    "set_outcome": "End of day",
+                    "set_outcome": "Fin del día",
                     "legs_used": legs_used,
                     "operations_touched": len(touched_ops),
                     "start_operation": set_start_operation,
@@ -1062,9 +1062,9 @@ def simulate_daily_sets(
         "sets": len(sets),
         "total_pnl": sets["set_result"].sum() if not sets.empty else np.nan,
         "avg_set": sets["set_result"].mean() if not sets.empty else np.nan,
-        "target_sets_pct": (sets["set_outcome"] == "Set target reached").mean() * 100 if not sets.empty else np.nan,
-        "loss_sets_pct": (sets["set_outcome"] == "Set loss reached").mean() * 100 if not sets.empty else np.nan,
-        "open_sets_pct": (sets["set_outcome"] == "End of day").mean() * 100 if not sets.empty else np.nan,
+        "target_sets_pct": (sets["set_outcome"] == "Meta tocada").mean() * 100 if not sets.empty else np.nan,
+        "loss_sets_pct": (sets["set_outcome"] == "Pérdida tocada").mean() * 100 if not sets.empty else np.nan,
+        "open_sets_pct": (sets["set_outcome"] == "Fin del día").mean() * 100 if not sets.empty else np.nan,
         "avg_legs_per_set": sets["legs_used"].mean() if not sets.empty else np.nan,
         "avg_operations_per_set": sets["operations_touched"].mean() if not sets.empty else np.nan,
         "best_set": sets["set_result"].max() if not sets.empty else np.nan,
@@ -2559,33 +2559,44 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     session_start_hms = s2.text_input("Inicio sesión", value="18:00:00", key="daily_session_start")
     session_end_hms = s3.text_input("Fin sesión", value="17:00:00", key="daily_session_end")
 
-    st.markdown("**Simulación de contratos**")
-    k1, k2, k3 = st.columns([1, 1, 1.2])
+    st.markdown("**Tamaño de contratos**")
+    section_note(
+        "Esta parte recalcula el PnL de cada pierna antes de simular. "
+        "Ejemplo: si una pierna hizo +100 con el tamaño original y pruebas 2.00x, la pierna cuenta como +200."
+    )
+    k1, k2 = st.columns([1, 1])
     contract_mode = k1.selectbox(
-        "Modo contratos",
-        ["Contratos reales", "Multiplicador simple"],
+        "Tamaño usado en la simulación",
+        ["Usar tamaño original", "Probar multiplicador"],
         index=0,
-        help="Multiplicador simple recalcula cada pierna: PnL simulado = PnL real de la pierna x multiplicador.",
+        help="Probar multiplicador recalcula cada pierna: PnL simulado = PnL real de la pierna x multiplicador.",
     )
     contract_multiplier = 1.0
-    if contract_mode == "Multiplicador simple":
-        contract_multiplier = k2.number_input("Multiplicador", min_value=0.10, value=1.00, step=0.25, format="%.2f")
+    if contract_mode == "Probar multiplicador":
+        contract_multiplier = k2.number_input("Multiplicador de contratos", min_value=0.10, value=1.00, step=0.25, format="%.2f")
     else:
-        k2.metric("Multiplicador", "1.00x")
+        k2.metric("Multiplicador de contratos", "1.00x")
 
-    scale_limits_with_contracts = k3.checkbox(
-        "Escalar meta/pérdida con contratos",
-        value=False,
-        help="OFF: si subes contratos, la meta/pérdida diaria se mantiene igual y se toca más rápido. ON: meta y pérdida también se multiplican.",
+    st.markdown("**Cómo tratar la meta y la pérdida cuando cambias contratos**")
+    limit_mode = st.radio(
+        "Límites de dinero",
+        ["Mantener meta/pérdida en USD", "Multiplicar meta/pérdida por contratos"],
+        index=0,
+        horizontal=True,
+        help=(
+            "Mantener en USD: si subes contratos, llegas más rápido a la misma meta/pérdida. "
+            "Multiplicar por contratos: si usas 2.00x, una meta de 600 se convierte en 1200."
+        ),
     )
+    scale_limits_with_contracts = limit_mode == "Multiplicar meta/pérdida por contratos"
 
     effective_daily_target = daily_target * contract_multiplier if scale_limits_with_contracts else daily_target
     effective_daily_loss = daily_loss * contract_multiplier if scale_limits_with_contracts else daily_loss
 
     st.caption(
-        "Regla: después de cada pierna cerrada revisamos el PnL acumulado del día operativo. "
-        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de esa sesión se ignoran en la simulación. "
-        f"Valores usados: meta {effective_daily_target:,.2f}, pérdida {effective_daily_loss:,.2f}, contratos {contract_multiplier:.2f}x."
+        "Regla diaria: después de cada pierna cerrada revisamos el PnL acumulado del día operativo. "
+        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de esa sesión se ignoran. "
+        f"Valores usados: meta {effective_daily_target:,.2f}, pérdida {effective_daily_loss:,.2f}, multiplicador {contract_multiplier:.2f}x."
     )
 
     daily_df, daily_m = simulate_daily_stop(
@@ -2643,23 +2654,37 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.markdown("---")
     st.subheader("6. Rotación de cuentas / avanzado")
     section_note(
-        "Esto usa los sets para probar una idea más real: comprar varias cuentas, rotarlas, "
-        "ver cuántas sobreviven y calcular el resultado después del costo."
+        "Esta sección prueba una idea práctica: comprar varias cuentas y repartir los ciclos entre ellas. "
+        "Un ciclo empieza con una pierna, acumula PnL hasta tocar meta o pérdida, y luego el siguiente ciclo pasa a las siguientes cuentas disponibles."
     )
 
     show_sets = st.checkbox("Mostrar rotación de cuentas", value=False)
     if show_sets:
-        st.markdown("**Reglas del set**")
-        c1, c2, c3 = st.columns(3)
-        set_target = c1.number_input("Target por set", min_value=1.0, value=600.0, step=50.0, key="set_target")
-        set_loss = c2.number_input("Loss por set", min_value=1.0, value=600.0, step=50.0, key="set_loss")
-        scale_set_limits = c3.checkbox(
-            "Escalar target/loss del set con contratos",
-            value=False,
-            help="ON multiplica target/loss del set por el multiplicador de contratos. OFF mantiene el valor fijo.",
+        with st.expander("Cómo funciona la rotación", expanded=True):
+            st.markdown(
+                """
+                **Regla simple de rotación:**
+
+                1. El simulador crea ciclos en orden de tiempo usando las piernas reales.
+                2. Cada ciclo termina cuando toca la meta del ciclo, la pérdida del ciclo o termina el día operativo.
+                3. Cada ciclo se copia a la cantidad de cuentas que elijas en **Cuentas operando a la vez**.
+                4. Luego rota a las siguientes cuentas vivas. Si una cuenta está quemada o llegó a objetivo, se salta.
+                5. Si ya no quedan cuentas vivas, la simulación se detiene.
+
+                Ejemplo: con 10 cuentas y 2 cuentas operando a la vez, el ciclo 1 va a cuentas 1 y 2, el ciclo 2 a cuentas 3 y 4, el ciclo 3 a cuentas 5 y 6, y así sigue rotando.
+                """
+            )
+
+        st.markdown("**Reglas del ciclo**")
+        c1, c2 = st.columns(2)
+        set_target = c1.number_input("Meta por ciclo", min_value=1.0, value=600.0, step=50.0, key="set_target")
+        set_loss = c2.number_input("Pérdida por ciclo", min_value=1.0, value=600.0, step=50.0, key="set_loss")
+        effective_set_target = set_target * contract_multiplier if scale_limits_with_contracts else set_target
+        effective_set_loss = set_loss * contract_multiplier if scale_limits_with_contracts else set_loss
+        st.caption(
+            f"Valores usados por ciclo: meta {effective_set_target:,.2f}, pérdida {effective_set_loss:,.2f}. "
+            "Estos valores siguen la misma regla de límites elegida arriba."
         )
-        effective_set_target = set_target * contract_multiplier if scale_set_limits else set_target
-        effective_set_loss = set_loss * contract_multiplier if scale_set_limits else set_loss
 
         sets_df, sets_m = simulate_daily_sets(
             legs_df,
@@ -2672,24 +2697,29 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
             contract_multiplier=contract_multiplier,
         )
 
-        st.markdown("**Resultado de sets antes de rotar cuentas**")
+        st.markdown("**Resultado de ciclos antes de rotar cuentas**")
         c = st.columns(4)
-        with c[0]: card("PnL Sets", fmt_money(sets_m.get("total_pnl", np.nan)))
-        with c[1]: card("Sets Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
-        with c[2]: card("Sets Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
-        with c[3]: card("Piernas/Set Prom", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
+        with c[0]: card("PnL Ciclos", fmt_money(sets_m.get("total_pnl", np.nan)))
+        with c[1]: card("Ciclos con Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
+        with c[2]: card("Ciclos con Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
+        with c[3]: card("Piernas/Ciclo Prom", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
 
-        st.markdown("**Reglas de cuentas**")
+        st.markdown("**Reglas de las cuentas**")
         a1, a2, a3, a4 = st.columns(4)
-        total_accounts = a1.number_input("Cantidad de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
-        accounts_per_set = a2.number_input("Cuentas copiadas por set", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
+        total_accounts = a1.number_input("Cantidad total de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
+        accounts_per_set = a2.number_input("Cuentas operando a la vez", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
         account_cost = a3.number_input("Costo por cuenta", min_value=0.0, value=150.0, step=25.0, key="account_cost")
-        account_max_loss = a4.number_input("Pérdida máxima por cuenta / blowup", min_value=1.0, value=2500.0, step=100.0, key="account_max_loss")
+        account_max_loss = a4.number_input("Pérdida máxima por cuenta", min_value=1.0, value=2500.0, step=100.0, key="account_max_loss")
+
+        st.caption(
+            f"Rotación usada: cada ciclo se aplica a {int(accounts_per_set)} cuenta(s) viva(s). "
+            "Después, el siguiente ciclo pasa a las siguientes cuentas disponibles."
+        )
 
         a5, a6 = st.columns(2)
-        account_profit_target = a5.number_input("Objetivo por cuenta opcional", min_value=0.0, value=0.0, step=100.0, key="account_profit_target")
+        account_profit_target = a5.number_input("Meta por cuenta opcional", min_value=0.0, value=0.0, step=100.0, key="account_profit_target")
         flat_at_account_loss = a6.checkbox(
-            "Flat exacto en blowup/objetivo de cuenta",
+            "Cerrar exacto en pérdida/meta de cuenta",
             value=True,
             help="ON: si la cuenta cae por debajo del límite, se registra exactamente en el límite. OFF: usa el cierre real del set.",
         )
@@ -2713,7 +2743,7 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
         r2 = st.columns(4)
         with r2[0]: card("Cuentas Vivas", f"{int(rotation_m.get('alive_accounts', 0))}")
-        with r2[1]: card("Cuentas en Objetivo", f"{int(rotation_m.get('target_accounts', 0))}")
+        with r2[1]: card("Cuentas con Meta", f"{int(rotation_m.get('target_accounts', 0))}")
         with r2[2]: card("Mejor Cuenta", fmt_money(rotation_m.get("best_account", np.nan)))
         with r2[3]: card("Peor Cuenta", fmt_money(rotation_m.get("worst_account", np.nan)))
 
@@ -2725,7 +2755,7 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         with st.expander("Ver timeline de rotación", expanded=False):
             st.dataframe(rotation_timeline, use_container_width=True)
 
-        with st.expander("Ver sets generados", expanded=False):
+        with st.expander("Ver ciclos generados", expanded=False):
             st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
 
     lines = []
