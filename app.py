@@ -1083,11 +1083,18 @@ def simulate_account_rotation_from_sets(
     account_profit_target: float = 0.0,
     flat_at_account_loss: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
-    """Rotate set results through multiple accounts.
+    """Rotate cycle results through multiple accounts.
 
-    Each set result is applied to a group of accounts. If accounts_per_set=2,
-    that means the same set is copied to two accounts, then the simulator rotates
-    to the next available accounts for the next set.
+    Important naming:
+    - ciclo = trading result block created from consecutive legs until the cycle reaches target/loss.
+    - grupo de cuentas = the accounts that receive that cycle.
+
+    Example: with 20 accounts and 5 accounts operating at once:
+    ciclo 1 -> cuentas 1-5
+    ciclo 2 -> cuentas 6-10
+    ciclo 3 -> cuentas 11-15
+    ciclo 4 -> cuentas 16-20
+    then it rotates again through the next alive accounts.
     """
     if sets_df.empty or total_accounts <= 0:
         return pd.DataFrame(), pd.DataFrame(), {}
@@ -1097,30 +1104,40 @@ def simulate_account_rotation_from_sets(
     account_max_loss = float(account_max_loss or 0.0)
     account_profit_target = float(account_profit_target or 0.0)
     account_cost = float(account_cost or 0.0)
+    total_groups = int(np.ceil(total_accounts / accounts_per_set))
+
+    def static_group_label(account_number: int) -> Tuple[int, str]:
+        gid = int(np.ceil(account_number / accounts_per_set))
+        start_acc = (gid - 1) * accounts_per_set + 1
+        end_acc = min(gid * accounts_per_set, total_accounts)
+        return gid, f"Grupo {gid} · Cuentas {start_acc}-{end_acc}"
 
     accounts = []
     for i in range(1, total_accounts + 1):
+        gid, glabel = static_group_label(i)
         accounts.append({
             "account": i,
             "status": "Viva",
             "gross_pnl": 0.0,
             "peak_pnl": 0.0,
             "max_drawdown": 0.0,
-            "sets_traded": 0,
-            "winning_sets": 0,
-            "losing_sets": 0,
-            "first_set_time": pd.NaT,
-            "last_set_time": pd.NaT,
+            "cycles_traded": 0,
+            "winning_cycles": 0,
+            "losing_cycles": 0,
+            "first_cycle_time": pd.NaT,
+            "last_cycle_time": pd.NaT,
+            "static_group_id": gid,
+            "static_group_label": glabel,
         })
 
     rows = []
     pointer = 0
-    ordered = sets_df.copy().sort_values(["trade_day", "set_start_time", "set_number"])
+    ordered = sets_df.copy().sort_values(["trade_day", "set_start_time", "set_number"]).reset_index(drop=True)
 
-    for _, set_row in ordered.iterrows():
+    for cycle_idx, (_, set_row) in enumerate(ordered.iterrows(), start=1):
         selected = []
         attempts = 0
-        while len(selected) < accounts_per_set and attempts < total_accounts * 2:
+        while len(selected) < accounts_per_set and attempts < total_accounts * 3:
             idx = pointer % total_accounts
             pointer += 1
             attempts += 1
@@ -1130,23 +1147,24 @@ def simulate_account_rotation_from_sets(
         if not selected:
             break
 
-        set_result = float(set_row.get("set_result", 0.0) or 0.0)
+        cycle_result = float(set_row.get("set_result", 0.0) or 0.0)
+        selected_accounts = [accounts[idx]["account"] for idx in selected]
+        selected_groups = sorted({accounts[idx]["static_group_id"] for idx in selected})
+        group_labels = sorted({accounts[idx]["static_group_label"] for idx in selected})
+        group_accounts_text = ", ".join([f"Cuenta {x}" for x in selected_accounts])
+        group_slot_text = " | ".join(group_labels)
 
         for idx in selected:
             acc = accounts[idx]
             before = acc["gross_pnl"]
             peak_before = acc["peak_pnl"]
-            after_raw = before + set_result
+            after_raw = before + cycle_result
             after = after_raw
             status_before = acc["status"]
             event_status = "Viva"
             burn_level = peak_before - account_max_loss if account_max_loss > 0 else np.nan
             raw_drawdown_from_peak = after_raw - peak_before
 
-            # IMPORTANT:
-            # Account max loss is treated as max account drawdown from the best point,
-            # not only total loss from zero.
-            # Example: peak +1,800 and limit 1,500 => burn level +300.
             if account_max_loss > 0 and raw_drawdown_from_peak <= -account_max_loss:
                 event_status = "Quemada"
                 after = burn_level if flat_at_account_loss else after_raw
@@ -1158,22 +1176,46 @@ def simulate_account_rotation_from_sets(
 
             applied = after - before
             acc["gross_pnl"] = after
-            acc["sets_traded"] += 1
-            acc["winning_sets"] += int(applied > 0)
-            acc["losing_sets"] += int(applied < 0)
-            if pd.isna(acc["first_set_time"]):
-                acc["first_set_time"] = set_row.get("set_start_time")
-            acc["last_set_time"] = set_row.get("set_end_time")
+            acc["cycles_traded"] += 1
+            acc["winning_cycles"] += int(applied > 0)
+            acc["losing_cycles"] += int(applied < 0)
+            if pd.isna(acc["first_cycle_time"]):
+                acc["first_cycle_time"] = set_row.get("set_start_time")
+            acc["last_cycle_time"] = set_row.get("set_end_time")
             acc["peak_pnl"] = max(acc["peak_pnl"], acc["gross_pnl"])
             current_dd = acc["gross_pnl"] - acc["peak_pnl"]
             acc["max_drawdown"] = min(acc["max_drawdown"], current_dd)
 
             rows.append({
+                # new clearer names
+                "ciclo_id": cycle_idx,
+                "ciclo_numero": cycle_idx,
+                "grupo_cuentas": group_accounts_text,
+                "grupos_base": group_slot_text,
+                "grupo_base_id": acc["static_group_id"],
+                "grupo_base": acc["static_group_label"],
+                "resultado_ciclo_original": cycle_result,
+                "resultado_ciclo_aplicado": applied,
+                "pnl_cuenta_antes": before,
+                "mejor_punto_antes": peak_before,
+                "nivel_quema_cuenta": burn_level,
+                "pnl_cuenta_despues_raw": after_raw,
+                "pnl_cuenta_despues": acc["gross_pnl"],
+                "caida_desde_mejor_punto_raw": raw_drawdown_from_peak,
+                "estado_cuenta_antes": status_before,
+                "estado_cuenta_despues": acc["status"],
+                "resultado_evento": event_status,
+                "resultado_ciclo": set_row.get("set_outcome"),
+                "piernas_usadas": set_row.get("legs_used"),
+                "operaciones_tocadas": set_row.get("operations_touched"),
+                "ciclo_inicio": set_row.get("set_start_time"),
+                "ciclo_fin": set_row.get("set_end_time"),
+                # old names kept for compatibility
                 "trade_day": set_row.get("trade_day"),
                 "month": set_row.get("month"),
-                "set_number": set_row.get("set_number"),
+                "set_number": cycle_idx,
                 "account": acc["account"],
-                "set_result_original": set_result,
+                "set_result_original": cycle_result,
                 "set_result_applied": applied,
                 "account_pnl_before": before,
                 "account_peak_before": peak_before,
@@ -1197,22 +1239,31 @@ def simulate_account_rotation_from_sets(
         gross = float(acc["gross_pnl"])
         account_rows.append({
             "account": acc["account"],
-            "status": "No usada" if acc["sets_traded"] == 0 else acc["status"],
+            "group_id": acc["static_group_id"],
+            "group_label": acc["static_group_label"],
+            "status": "No usada" if acc["cycles_traded"] == 0 else acc["status"],
             "gross_pnl": gross,
             "account_cost": account_cost,
             "net_pnl_after_cost": gross - account_cost,
             "max_drawdown": acc["max_drawdown"],
-            "sets_traded": acc["sets_traded"],
-            "winning_sets": acc["winning_sets"],
-            "losing_sets": acc["losing_sets"],
-            "first_set_time": acc["first_set_time"],
-            "last_set_time": acc["last_set_time"],
+            "cycles_traded": acc["cycles_traded"],
+            "winning_cycles": acc["winning_cycles"],
+            "losing_cycles": acc["losing_cycles"],
+            "first_cycle_time": acc["first_cycle_time"],
+            "last_cycle_time": acc["last_cycle_time"],
+            # old aliases
+            "sets_traded": acc["cycles_traded"],
+            "winning_sets": acc["winning_cycles"],
+            "losing_sets": acc["losing_cycles"],
+            "first_set_time": acc["first_cycle_time"],
+            "last_set_time": acc["last_cycle_time"],
         })
     accounts_df = pd.DataFrame(account_rows)
 
     metrics = {
         "total_accounts": total_accounts,
-        "used_accounts": int((accounts_df["sets_traded"] > 0).sum()),
+        "total_groups": total_groups,
+        "used_accounts": int((accounts_df["cycles_traded"] > 0).sum()),
         "alive_accounts": int((accounts_df["status"] == "Viva").sum()),
         "blown_accounts": int((accounts_df["status"] == "Quemada").sum()),
         "target_accounts": int((accounts_df["status"] == "Objetivo").sum()),
@@ -1223,7 +1274,7 @@ def simulate_account_rotation_from_sets(
         "best_account": accounts_df["net_pnl_after_cost"].max() if not accounts_df.empty else np.nan,
         "worst_account": accounts_df["net_pnl_after_cost"].min() if not accounts_df.empty else np.nan,
         "worst_account_drawdown": accounts_df["max_drawdown"].min() if not accounts_df.empty else np.nan,
-        "sets_applied": len(timeline),
+        "cycles_applied": len(ordered),
     }
     return accounts_df, timeline, metrics
 
@@ -1234,7 +1285,7 @@ def render_account_rotation_chart(accounts_df: pd.DataFrame):
     chart_df = accounts_df.copy()
     chart_df["account_label"] = "Cuenta " + chart_df["account"].astype(str)
     if go is not None:
-        custom = chart_df[["account_label", "status", "gross_pnl", "account_cost", "net_pnl_after_cost", "max_drawdown", "sets_traded"]].to_numpy()
+        custom = chart_df[["account_label", "group_label", "status", "gross_pnl", "account_cost", "net_pnl_after_cost", "max_drawdown", "cycles_traded"]].to_numpy()
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=chart_df["account_label"],
@@ -1243,12 +1294,13 @@ def render_account_rotation_chart(accounts_df: pd.DataFrame):
             customdata=custom,
             hovertemplate=(
                 "Cuenta: %{customdata[0]}<br>"
-                "Estado: %{customdata[1]}<br>"
-                "PnL bruto: %{customdata[2]:,.2f}<br>"
-                "Costo cuenta: %{customdata[3]:,.2f}<br>"
-                "Neto después de costo: %{customdata[4]:,.2f}<br>"
-                "Caída máx cuenta: %{customdata[5]:,.2f}<br>"
-                "Sets operados: %{customdata[6]}<extra></extra>"
+                "Grupo base: %{customdata[1]}<br>"
+                "Estado: %{customdata[2]}<br>"
+                "PnL bruto: %{customdata[3]:,.2f}<br>"
+                "Costo cuenta: %{customdata[4]:,.2f}<br>"
+                "Neto después de costo: %{customdata[5]:,.2f}<br>"
+                "Caída máx cuenta: %{customdata[6]:,.2f}<br>"
+                "Ciclos operados: %{customdata[7]}<extra></extra>"
             ),
         ))
         fig.add_hline(y=0, line_width=1)
@@ -1263,6 +1315,67 @@ def render_account_rotation_chart(accounts_df: pd.DataFrame):
         plt.xticks(rotation=30)
         fig.tight_layout()
         st.pyplot(fig)
+
+
+def render_rotation_group_curve(rotation_timeline: pd.DataFrame, total_accounts: int, accounts_per_set: int):
+    """Show how each base account group evolves through the rotation cycles."""
+    if rotation_timeline.empty or total_accounts <= 0 or accounts_per_set <= 0:
+        return
+
+    work = rotation_timeline.copy().sort_values(["ciclo_id", "account"])
+    cycle_ids = sorted(work["ciclo_id"].dropna().unique().tolist())
+    if not cycle_ids:
+        return
+
+    total_groups = int(np.ceil(total_accounts / accounts_per_set))
+    pivot = work.pivot_table(index="ciclo_id", columns="account", values="pnl_cuenta_despues", aggfunc="last")
+    pivot = pivot.sort_index().reindex(cycle_ids).ffill().fillna(0.0)
+
+    curve_df = pd.DataFrame({"ciclo_id": cycle_ids})
+    custom_cols = ["ciclo_id"]
+    line_meta = []
+    for gid in range(1, total_groups + 1):
+        start_acc = (gid - 1) * accounts_per_set + 1
+        end_acc = min(gid * accounts_per_set, total_accounts)
+        cols = [acc for acc in range(start_acc, end_acc + 1) if acc in pivot.columns]
+        label = f"Grupo {gid} · Cuentas {start_acc}-{end_acc}"
+        colname = f"grupo_{gid}"
+        curve_df[colname] = pivot[cols].sum(axis=1) if cols else 0.0
+        line_meta.append((colname, label))
+
+    if go is not None:
+        fig = go.Figure()
+        for colname, label in line_meta:
+            fig.add_trace(go.Scatter(
+                x=curve_df["ciclo_id"],
+                y=curve_df[colname],
+                mode="lines+markers",
+                name=label,
+                hovertemplate=(
+                    f"{label}<br>"
+                    "Ciclo: %{x}<br>"
+                    "PnL acumulado del grupo: %{y:,.2f}<extra></extra>"
+                ),
+            ))
+        fig.update_layout(
+            title="Curva acumulada por grupo de cuentas",
+            xaxis_title="Ciclo",
+            yaxis_title="PnL acumulado",
+            height=430,
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for colname, label in line_meta:
+        ax.plot(curve_df["ciclo_id"], curve_df[colname], marker="o", label=label)
+    ax.set_title("Curva acumulada por grupo de cuentas")
+    ax.set_xlabel("Ciclo")
+    ax.set_ylabel("PnL acumulado")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
 
 
 def render_real_vs_sim_daily_cards(real_m: Dict[str, float], sim_m: Dict[str, float]):
@@ -2666,11 +2779,11 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
     st.subheader("6. Rotación de cuentas / avanzado")
     section_note(
         "Esta sección prueba una idea práctica: comprar varias cuentas y repartir los ciclos entre ellas. "
-        "Un ciclo empieza con una pierna, acumula PnL hasta tocar meta o pérdida, y luego el siguiente ciclo pasa a las siguientes cuentas disponibles."
+        "Un ciclo empieza con una pierna, acumula PnL hasta tocar meta o pérdida. Después, ese ciclo se aplica a un grupo de cuentas y la rotación pasa al siguiente grupo disponible."
     )
 
-    show_sets = st.checkbox("Mostrar rotación de cuentas", value=False)
-    if show_sets:
+    show_rotation = st.checkbox("Mostrar rotación de cuentas", value=False)
+    if show_rotation:
         with st.expander("Cómo funciona la rotación", expanded=True):
             st.markdown(
                 """
@@ -2678,11 +2791,20 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
                 1. El simulador crea ciclos en orden de tiempo usando las piernas reales.
                 2. Cada ciclo termina cuando toca la meta del ciclo, la pérdida del ciclo o termina el día operativo.
-                3. Cada ciclo se copia a la cantidad de cuentas que elijas en **Cuentas operando a la vez**.
-                4. Luego rota a las siguientes cuentas vivas. Si una cuenta está quemada o llegó a objetivo, se salta.
-                5. Si ya no quedan cuentas vivas, la simulación se detiene.
+                3. Ese ciclo se asigna al grupo de cuentas que esté en turno según la rotación.
+                4. Cuando el ciclo termina, el siguiente ciclo pasa al siguiente grupo de cuentas vivas.
+                5. Si una cuenta está quemada o llegó a objetivo, se salta. Si ya no quedan cuentas vivas, la simulación se detiene.
 
-                Ejemplo: con 10 cuentas y 2 cuentas operando a la vez, el ciclo 1 va a cuentas 1 y 2, el ciclo 2 a cuentas 3 y 4, el ciclo 3 a cuentas 5 y 6, y así sigue rotando.
+                **Importante:** aquí **ciclo** no significa grupo de cuentas.
+                - **Ciclo** = bloque de trading que termina en meta o pérdida.
+                - **Grupo de cuentas** = cuentas que reciben ese ciclo.
+
+                Ejemplo: con 20 cuentas y 5 cuentas operando a la vez,
+                ciclo 1 -> cuentas 1 a 5,
+                ciclo 2 -> cuentas 6 a 10,
+                ciclo 3 -> cuentas 11 a 15,
+                ciclo 4 -> cuentas 16 a 20,
+                ciclo 5 -> vuelve a cuentas 1 a 5 si siguen vivas.
                 """
             )
 
@@ -2710,15 +2832,15 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
         st.markdown("**Resultado de ciclos antes de rotar cuentas**")
         c = st.columns(4)
-        with c[0]: card("PnL Ciclos", fmt_money(sets_m.get("total_pnl", np.nan)))
+        with c[0]: card("PnL de los ciclos", fmt_money(sets_m.get("total_pnl", np.nan)))
         with c[1]: card("Ciclos con Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
         with c[2]: card("Ciclos con Pérdida", fmt_pct(sets_m.get("loss_sets_pct", np.nan)))
-        with c[3]: card("Piernas/Ciclo Prom", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
+        with c[3]: card("Piernas por ciclo", "-" if pd.isna(sets_m.get("avg_legs_per_set", np.nan)) else f"{sets_m['avg_legs_per_set']:.2f}")
 
         st.markdown("**Reglas de las cuentas**")
         a1, a2, a3, a4 = st.columns(4)
         total_accounts = a1.number_input("Cantidad total de cuentas", min_value=1, value=10, step=1, key="rotation_accounts")
-        accounts_per_set = a2.number_input("Cuentas operando a la vez", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
+        accounts_per_set = a2.number_input("Cuentas por grupo", min_value=1, max_value=int(total_accounts), value=min(2, int(total_accounts)), step=1, key="accounts_per_set")
         account_cost = a3.number_input("Costo por cuenta", min_value=0.0, value=150.0, step=25.0, key="account_cost")
         account_max_loss = a4.number_input(
             "Caída máxima por cuenta",
@@ -2730,8 +2852,8 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         )
 
         st.caption(
-            f"Rotación usada: cada ciclo se aplica a {int(accounts_per_set)} cuenta(s) viva(s). "
-            "Después, el siguiente ciclo pasa a las siguientes cuentas disponibles. "
+            f"Rotación usada: cada ciclo se aplica a un grupo de {int(accounts_per_set)} cuenta(s) viva(s). "
+            "Cuando el ciclo termina, la rotación pasa al siguiente grupo disponible. "
             "La cuenta se quema si cae desde su mejor punto más de la caída máxima configurada."
         )
 
@@ -2768,14 +2890,46 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
 
         render_account_rotation_chart(accounts_df)
 
+        st.markdown("**Curva acumulada por grupo de cuentas**")
+        st.caption("Cada línea muestra cómo va acumulando resultado cada grupo base de cuentas (por ejemplo, Grupo 1 = cuentas 1-5).")
+        render_rotation_group_curve(rotation_timeline, int(total_accounts), int(accounts_per_set))
+
         with st.expander("Ver resumen por cuenta", expanded=True):
-            st.dataframe(accounts_df, use_container_width=True)
+            summary_cols = [
+                "account", "group_label", "status", "gross_pnl", "account_cost", "net_pnl_after_cost",
+                "max_drawdown", "cycles_traded", "winning_cycles", "losing_cycles",
+                "first_cycle_time", "last_cycle_time",
+            ]
+            st.dataframe(accounts_df[[c for c in summary_cols if c in accounts_df.columns]], use_container_width=True)
 
         with st.expander("Ver timeline de rotación", expanded=False):
-            st.dataframe(rotation_timeline, use_container_width=True)
+            timeline_show = rotation_timeline.copy()
+            timeline_cols = [
+                "trade_day", "month", "ciclo_id", "grupo_cuentas", "grupos_base", "account",
+                "resultado_ciclo_original", "resultado_ciclo_aplicado", "pnl_cuenta_antes", "mejor_punto_antes",
+                "nivel_quema_cuenta", "pnl_cuenta_despues_raw", "pnl_cuenta_despues",
+                "caida_desde_mejor_punto_raw", "estado_cuenta_antes", "estado_cuenta_despues",
+                "resultado_evento", "resultado_ciclo", "piernas_usadas", "operaciones_tocadas",
+                "ciclo_inicio", "ciclo_fin",
+            ]
+            st.dataframe(timeline_show[[c for c in timeline_cols if c in timeline_show.columns]], use_container_width=True)
 
         with st.expander("Ver ciclos generados", expanded=False):
-            st.dataframe(sets_df.sort_values(["trade_day", "set_number"]), use_container_width=True)
+            cycles_show = sets_df.copy().rename(columns={
+                "set_number": "ciclo_id",
+                "set_result": "resultado_ciclo",
+                "raw_pnl_at_set_close": "pnl_raw_al_cerrar",
+                "set_outcome": "salida_ciclo",
+                "set_start_time": "ciclo_inicio",
+                "set_end_time": "ciclo_fin",
+                "legs_used": "piernas_usadas",
+                "operations_touched": "operaciones_tocadas",
+            })
+            order_cols = [
+                "month", "trade_day", "ciclo_id", "resultado_ciclo", "pnl_raw_al_cerrar", "salida_ciclo",
+                "piernas_usadas", "operaciones_tocadas", "start_operation", "start_leg", "ciclo_inicio", "ciclo_fin",
+            ]
+            st.dataframe(cycles_show[[c for c in order_cols if c in cycles_show.columns]].sort_values(["trade_day", "ciclo_id"]), use_container_width=True)
 
     lines = []
     if daily_m:
