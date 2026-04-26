@@ -691,12 +691,7 @@ def daily_summary(ops_df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 
-def _prepare_leg_timeline(
-    legs_df: pd.DataFrame,
-    use_operational_day: bool = False,
-    session_start_hms: str = "18:00:00",
-    session_end_hms: str = "17:00:00",
-) -> pd.DataFrame:
+def _prepare_leg_timeline(legs_df: pd.DataFrame) -> pd.DataFrame:
     """Return one row per real executed leg, ordered by the moment the PnL becomes known.
 
     For daily target/loss math we use legs, not operation totals.
@@ -712,9 +707,7 @@ def _prepare_leg_timeline(
     legs["event_time"] = legs["event_time"].fillna(legs["entry_time"])
     legs["event_time"] = legs["event_time"].fillna(legs["sequence_started_at"])
 
-    if use_operational_day:
-        legs = apply_operational_trade_day(legs, "event_time", session_start_hms, session_end_hms)
-    elif "trade_day" not in legs.columns or legs["trade_day"].isna().all():
+    if "trade_day" not in legs.columns or legs["trade_day"].isna().all():
         legs["trade_day"] = legs["event_time"].dt.date
 
     legs["leg_pnl"] = pd.to_numeric(legs["realized_pnl_currency"], errors="coerce").fillna(0.0)
@@ -747,14 +740,9 @@ def _daily_metrics_from_results(df: pd.DataFrame, pnl_col: str, time_col: str = 
     }
 
 
-def real_daily_from_legs(
-    legs_df: pd.DataFrame,
-    use_operational_day: bool = False,
-    session_start_hms: str = "18:00:00",
-    session_end_hms: str = "17:00:00",
-) -> pd.DataFrame:
+def real_daily_from_legs(legs_df: pd.DataFrame) -> pd.DataFrame:
     """Real day result using the same source as the simulator: closed legs."""
-    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    legs = _prepare_leg_timeline(legs_df)
     if legs.empty:
         return pd.DataFrame()
 
@@ -780,9 +768,6 @@ def simulate_daily_stop(
     daily_target: float,
     daily_loss: float,
     flat_at_limits: bool = True,
-    use_operational_day: bool = False,
-    session_start_hms: str = "18:00:00",
-    session_end_hms: str = "17:00:00",
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Classic daily stop using real legs.
 
@@ -794,11 +779,11 @@ def simulate_daily_stop(
     -615 when the configured max loss was -600.
     """
     rows = []
-    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    legs = _prepare_leg_timeline(legs_df)
     if legs.empty:
         return pd.DataFrame(), {}
 
-    real_daily = real_daily_from_legs(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    real_daily = real_daily_from_legs(legs_df)
     real_lookup = real_daily.set_index("trade_day") if not real_daily.empty else pd.DataFrame()
 
     for trade_day, day_df in legs.groupby("trade_day", dropna=False):
@@ -874,21 +859,14 @@ def simulate_daily_stop(
     return sim, metrics
 
 
-def simulate_daily_sets(
-    legs_df: pd.DataFrame,
-    set_target: float,
-    set_loss: float,
-    use_operational_day: bool = False,
-    session_start_hms: str = "18:00:00",
-    session_end_hms: str = "17:00:00",
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def simulate_daily_sets(legs_df: pd.DataFrame, set_target: float, set_loss: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Daily set simulator using legs.
 
     A set consumes real legs in chronological order. When the running set PnL
     reaches target/loss, that set closes and the next leg starts a new set.
     """
     rows = []
-    legs = _prepare_leg_timeline(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    legs = _prepare_leg_timeline(legs_df)
     if legs.empty:
         return pd.DataFrame(), {}
 
@@ -1108,7 +1086,6 @@ def monthly_daily_stop_summary(daily_df: pd.DataFrame) -> pd.DataFrame:
         sim_m = _daily_metrics_from_results(month_df, "simulated_day_pnl", "trade_day")
         rows.append({
             "month": month,
-            "mes": month_label_es(month),
             "dias": len(month_df),
             "pnl_real": real_m.get("total_pnl", np.nan),
             "pnl_simulado": sim_m.get("total_pnl", np.nan),
@@ -1132,17 +1109,14 @@ def render_monthly_daily_stop_chart(monthly_df: pd.DataFrame):
     if monthly_df.empty:
         return
     if go is not None:
-        plot_df = monthly_df.copy()
-        if "mes" not in plot_df.columns:
-            plot_df["mes"] = plot_df["month"].apply(month_label_es)
-        custom = plot_df[[
-            "mes", "pnl_real", "pnl_simulado", "diferencia", "pf_real", "pf_simulado",
+        custom = monthly_df[[
+            "month", "pnl_real", "pnl_simulado", "diferencia", "pf_real", "pf_simulado",
             "win_rate_real", "win_rate_simulado", "caida_max_real", "caida_max_simulada",
             "dias_meta", "dias_loss", "dias_cambiados",
         ]].to_numpy()
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            x=plot_df["mes"], y=plot_df["pnl_real"], name="Real", customdata=custom,
+            x=monthly_df["month"], y=monthly_df["pnl_real"], name="Real", customdata=custom,
             hovertemplate=(
                 "<b>Mes:</b> %{customdata[0]}<br>"
                 "<b>PnL Real:</b> $%{customdata[1]:,.2f}<br>"
@@ -1153,7 +1127,7 @@ def render_monthly_daily_stop_chart(monthly_df: pd.DataFrame):
             ),
         ))
         fig.add_trace(go.Bar(
-            x=plot_df["mes"], y=plot_df["pnl_simulado"], name="Simulado", customdata=custom,
+            x=monthly_df["month"], y=monthly_df["pnl_simulado"], name="Simulado", customdata=custom,
             hovertemplate=(
                 "<b>Mes:</b> %{customdata[0]}<br>"
                 "<b>PnL Simulado:</b> $%{customdata[2]:,.2f}<br>"
@@ -1169,7 +1143,7 @@ def render_monthly_daily_stop_chart(monthly_df: pd.DataFrame):
         ))
         fig.add_hline(y=0, line_width=1)
         fig.update_layout(
-            title="Resultado por mes · Real vs Simulado",
+            title="Resultado mensual · Real vs Simulado",
             xaxis_title="Mes",
             yaxis_title="PnL",
             barmode="group",
@@ -1401,7 +1375,6 @@ def monthly_simulated_reversal_summary(sim_df: pd.DataFrame) -> pd.DataFrame:
         sim_pnl = pd.to_numeric(g["sequence_net_pnl_simulado"], errors="coerce").fillna(0).sum()
         rows.append({
             "month": month,
-            "mes": month_label_es(month),
             "operaciones": len(g),
             "pnl_real": real_pnl,
             "pnl_reversal_seleccionado": sim_pnl,
@@ -2287,34 +2260,13 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         ),
     )
 
-    st.markdown("**Sesión usada para separar los días**")
-    s1, s2, s3 = st.columns([1, 1, 1.4])
-    use_operational_day = s1.checkbox(
-        "Usar día operativo del bot",
-        value=True,
-        help=(
-            "ON: agrupa las piernas según la sesión intradía del bot, por ejemplo 18:00 a 17:00. "
-            "Esto evita partir una misma sesión overnight en dos días calendario."
-        ),
-    )
-    session_start_hms = s2.text_input("Inicio sesión", value="18:00:00", key="daily_session_start")
-    session_end_hms = s3.text_input("Fin sesión", value="17:00:00", key="daily_session_end")
-
     st.caption(
-        "Regla: después de cada pierna cerrada revisamos el PnL acumulado del día operativo. "
-        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de esa sesión se ignoran en la simulación."
+        "Regla: después de cada pierna cerrada revisamos el PnL acumulado del día. "
+        "Si toca la meta o la pérdida, el día se detiene y las siguientes piernas de ese día se ignoran en la simulación."
     )
 
-    daily_df, daily_m = simulate_daily_stop(
-        legs_df,
-        daily_target,
-        daily_loss,
-        flat_at_limits=flat_at_limits,
-        use_operational_day=use_operational_day,
-        session_start_hms=session_start_hms,
-        session_end_hms=session_end_hms,
-    )
-    real_daily = real_daily_from_legs(legs_df, use_operational_day, session_start_hms, session_end_hms)
+    daily_df, daily_m = simulate_daily_stop(legs_df, daily_target, daily_loss, flat_at_limits=flat_at_limits)
+    real_daily = real_daily_from_legs(legs_df)
     real_m = _daily_metrics_from_results(real_daily, "real_day_pnl", "trade_day")
 
     if daily_df.empty or not daily_m:
@@ -2369,7 +2321,7 @@ def render_simulador_diario(ops_df: pd.DataFrame, legs_df: pd.DataFrame):
         set_target = c1.number_input("Target por set", min_value=1.0, value=600.0, step=50.0, key="set_target")
         set_loss = c2.number_input("Loss por set", min_value=1.0, value=300.0, step=50.0, key="set_loss")
 
-        sets_df, sets_m = simulate_daily_sets(legs_df, set_target, set_loss, use_operational_day, session_start_hms, session_end_hms)
+        sets_df, sets_m = simulate_daily_sets(legs_df, set_target, set_loss)
         c = st.columns(4)
         with c[0]: card("PnL Sets", fmt_money(sets_m.get("total_pnl", np.nan)))
         with c[1]: card("Sets Meta", fmt_pct(sets_m.get("target_sets_pct", np.nan)))
